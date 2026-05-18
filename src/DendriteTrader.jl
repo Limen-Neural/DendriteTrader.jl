@@ -147,6 +147,7 @@ struct ExecutionDecision
     executed::Bool
     reason::String
     kelly_fraction::Float64
+    applied_fraction::Float64
     position_units::Float64
     latency_ns::Int64
 end
@@ -200,12 +201,12 @@ function execute_signal!(
         engine.rejected_signals += 1
         return ExecutionDecision(signal, false,
             "confidence=$(signal.confidence) < threshold=$(engine.confidence_threshold)",
-            0.0, 0.0, lat)
+            0.0, 0.0, 0.0, lat)
     end
 
     if signal.side == Neutral
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false, "neutral signal", 0.0, 0.0, lat)
+        return ExecutionDecision(signal, false, "neutral signal", 0.0, 0.0, 0.0, lat)
     end
 
     position = size_position(
@@ -218,8 +219,10 @@ function execute_signal!(
 
     if units <= 0.0
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false, "zero-sized position", 0.0, 0.0, lat)
+        return ExecutionDecision(signal, false, "zero-sized position", position.kelly_fraction, 0.0, 0.0, lat)
     end
+
+    applied_fraction = account_balance <= 0.0 ? 0.0 : (units * signal.price) / account_balance
 
     # Update position book
     current = get(engine.positions, signal.ticker, 0.0)
@@ -230,7 +233,7 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
-    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, units, lat)
+    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, applied_fraction, units, lat)
 end
 
 """

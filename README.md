@@ -182,7 +182,7 @@ The ZMQ listener expects JSON objects matching this schema:
 |-----------------|-------------|
 | `TradeSignal` | Immutable struct holding a deserialized trade signal |
 | `ExecutionEngine` | Stateful engine with confidence gate, Kelly sizing, and position tracking |
-| `ExecutionDecision` | Result of processing one signal |
+| `ExecutionDecision` | Result of processing one signal, including requested `kelly_fraction` and capped `applied_fraction` |
 | `execute_signal!(engine, signal, balance)` | Gate, size, and process a single signal |
 | `latency_ns(signal)` | End-to-end latency in nanoseconds |
 | `passes_gate(signal, threshold)` | Boolean check: `signal.confidence >= threshold` |

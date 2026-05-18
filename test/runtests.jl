@@ -21,6 +21,7 @@ using DendriteTrader
         @test dec.executed
         @test dec.position_units > 0.0
         @test dec.kelly_fraction > 0.0
+        @test dec.applied_fraction > 0.0
 
         # Signal below threshold → rejected
         sig_lo = TradeSignal(Dict("ticker"=>"MARKET-B","side"=>"BUY","price"=>90.0,"quantity"=>1.0,"confidence"=>0.70,"timestamp_ns"=>0))
@@ -58,6 +59,9 @@ using DendriteTrader
         f_bad = kelly_fraction(win_rate=0.40, avg_win=1.0, avg_loss=2.0)
         @test f_bad == 0.0
 
+        f_zero = kelly_fraction(win_rate=0.0, avg_win=1_000, avg_loss=1)
+        @test f_zero == 0.0
+
         f_hi = kelly_fraction(win_rate=0.70, avg_win=10.0, avg_loss=5.0)
         f_lo = kelly_fraction(win_rate=0.52, avg_win=10.0, avg_loss=5.0)
         @test f_hi > f_lo
@@ -86,6 +90,9 @@ using DendriteTrader
         @test pos.risk == Moderate
         @test 0.0 < pos.account_risk_pct < 100.0
 
+        pos_from_ints = size_position(confidence=0.90f0, price=100, account_balance=10_000)
+        @test pos_from_ints.units > 0.0
+
         pos_hi = size_position(confidence=0.95, price=100.0, account_balance=10_000.0)
         pos_lo = size_position(confidence=0.72, price=100.0, account_balance=10_000.0)
         @test pos_hi.units >= pos_lo.units
@@ -107,6 +114,8 @@ using DendriteTrader
             payoff_ratio=engine.payoff_ratio,
         ).kelly_fraction
         @test dec.kelly_fraction ≈ k_model
+        @test dec.kelly_fraction > dec.applied_fraction
+        @test dec.applied_fraction ≈ 0.09
 
         zero_dec = execute_signal!(engine, sig, 0.0)
         @test !zero_dec.executed

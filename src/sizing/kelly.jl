@@ -11,10 +11,10 @@ Compute a conservative half-Kelly position fraction from historical trade statis
 # Returns
 Half-Kelly fraction clamped to `[0.0, 0.20]`.
 """
-function kelly_fraction(; win_rate::Float64, avg_win::Float64, avg_loss::Float64)::Float64
-    win_rate = clamp(win_rate, 0.01, 0.99)
-    avg_win = max(avg_win, 1e-9)
-    avg_loss = max(avg_loss, 1e-9)
+function kelly_fraction(; win_rate::Real, avg_win::Real, avg_loss::Real)::Float64
+    win_rate = clamp(Float64(win_rate), 0.0, 1.0)
+    avg_win = max(Float64(avg_win), 1e-9)
+    avg_loss = max(Float64(avg_loss), 1e-9)
 
     b = avg_win / avg_loss
     q = 1.0 - win_rate
@@ -29,9 +29,9 @@ end
 
 Compute the half-Kelly fraction for win probability `p` and payoff ratio `b`.
 """
-function half_kelly(p::Float64, b::Float64)::Float64
-    p = clamp(p, 0.01, 0.99)
-    b = max(b, 1e-9)
+function half_kelly(p::Real, b::Real)::Float64
+    p = clamp(Float64(p), 0.0, 1.0)
+    b = max(Float64(b), 1e-9)
     q = 1.0 - p
     full = (p * b - q) / b
     return clamp(full * 0.5, 0.0, 1.0)
@@ -44,8 +44,8 @@ Map neural confidence `[0, 1]` to a half-Kelly position fraction.
 
 `payoff_ratio` is interpreted as an odds-style average win/loss ratio.
 """
-function from_confidence(; confidence::Float64, payoff_ratio::Float64 = 1.5)::Float64
-    return half_kelly(clamp(confidence, 0.01, 0.99), max(payoff_ratio, 1e-9))
+function from_confidence(; confidence::Real, payoff_ratio::Real = 1.5)::Float64
+    return half_kelly(confidence, payoff_ratio)
 end
 
 """
@@ -65,7 +65,8 @@ end
 
 Classify neural confidence into a qualitative risk tier.
 """
-function risk_tier(confidence::Float64)::RiskTier
+function risk_tier(confidence::Real)::RiskTier
+    confidence = Float64(confidence)
     if confidence >= 0.95
         return Aggressive
     elseif confidence >= 0.85
@@ -106,17 +107,23 @@ Compute position sizing from neural confidence.
 prices or balances return a zero-sized position.
 """
 function size_position(;
-    confidence::Float64,
-    price::Float64,
-    account_balance::Float64,
-    payoff_ratio::Float64 = 1.5,
-    kelly_scalar::Float64 = 0.5,
+    confidence::Real,
+    price::Real,
+    account_balance::Real,
+    payoff_ratio::Real = 1.5,
+    kelly_scalar::Real = 0.5,
 )::PositionSize
+    confidence = Float64(confidence)
+    price = Float64(price)
+    account_balance = Float64(account_balance)
+    payoff_ratio = Float64(payoff_ratio)
+    kelly_scalar = Float64(kelly_scalar)
+
     if price <= 0.0 || account_balance <= 0.0
         return PositionSize(0.0, 0.0, confidence, risk_tier(confidence), 0.0)
     end
 
-    p = clamp(confidence, 0.01, 0.99)
+    p = clamp(confidence, 0.0, 1.0)
     b = max(payoff_ratio, 1e-9)
     q = 1.0 - p
     full_k = (p * b - q) / b
