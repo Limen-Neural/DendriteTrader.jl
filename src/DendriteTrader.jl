@@ -221,8 +221,6 @@ function execute_signal!(
         return ExecutionDecision(signal, false, "zero-sized position", 0.0, 0.0, lat)
     end
 
-    applied_fraction = account_balance <= 0.0 ? 0.0 : (units * signal.price) / account_balance
-
     # Update position book
     current = get(engine.positions, signal.ticker, 0.0)
     if signal.side == Buy
@@ -232,7 +230,7 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
-    return ExecutionDecision(signal, true, "executed", applied_fraction, units, lat)
+    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, units, lat)
 end
 
 """
