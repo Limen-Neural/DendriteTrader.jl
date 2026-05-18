@@ -13,7 +13,7 @@ using DendriteTrader
     end
 
     @testset "ExecutionEngine — confidence gate" begin
-        engine = ExecutionEngine(confidence_threshold=0.85f0, payoff_ratio=1.5)
+        engine = ExecutionEngine(confidence_threshold=0.85f0)
 
         # Signal above threshold → executed
         sig_hi = TradeSignal(Dict("ticker"=>"MARKET-B","side"=>"BUY","price"=>90.0,"quantity"=>1.0,"confidence"=>0.90,"timestamp_ns"=>0))
@@ -29,14 +29,14 @@ using DendriteTrader
     end
 
     @testset "ExecutionEngine — position tracking" begin
-        engine = ExecutionEngine(payoff_ratio=1.5)
+        engine = ExecutionEngine()
         sig = TradeSignal(Dict("ticker"=>"MARKET-C","side"=>"BUY","price"=>0.03,"quantity"=>100.0,"confidence"=>0.92,"timestamp_ns"=>0))
         execute_signal!(engine, sig, 500.0)
         @test get(engine.positions, "MARKET-C", 0.0) > 0.0
     end
 
     @testset "fill_rate" begin
-        engine = ExecutionEngine(confidence_threshold=0.85f0, payoff_ratio=1.5)
+        engine = ExecutionEngine(confidence_threshold=0.85f0)
         for conf in [0.90, 0.70, 0.88, 0.60]
             s = TradeSignal(Dict("ticker"=>"MARKET-A","side"=>"BUY","price"=>100.0,"quantity"=>1.0,"confidence"=>conf,"timestamp_ns"=>0))
             execute_signal!(engine, s, 10_000.0)
@@ -62,8 +62,8 @@ using DendriteTrader
         f_lo = kelly_fraction(win_rate=0.52, avg_win=10.0, avg_loss=5.0)
         @test f_hi > f_lo
 
-        f_conf_high = from_confidence(confidence=0.95, payoff_ratio=1.5)
-        f_conf_low = from_confidence(confidence=0.55, payoff_ratio=1.5)
+        f_conf_high = from_confidence(confidence=0.95)
+        f_conf_low = from_confidence(confidence=0.55)
         @test f_conf_high > f_conf_low
         @test 0.0 <= f_conf_low <= 1.0
         @test 0.0 <= f_conf_high <= 1.0
@@ -80,14 +80,30 @@ using DendriteTrader
         @test risk_tier(0.75) == Conservative
         @test risk_tier(0.50) == Minimal
 
-        pos = size_position(confidence=0.90, price=100.0, account_balance=10_000.0, payoff_ratio=1.5)
+        pos = size_position(confidence=0.90, price=100.0, account_balance=10_000.0)
         @test pos.units > 0.0
         @test pos.kelly_fraction > 0.0
         @test pos.risk == Moderate
         @test 0.0 < pos.account_risk_pct < 100.0
 
-        pos_hi = size_position(confidence=0.95, price=100.0, account_balance=10_000.0, payoff_ratio=1.5)
-        pos_lo = size_position(confidence=0.72, price=100.0, account_balance=10_000.0, payoff_ratio=1.5)
+        pos_hi = size_position(confidence=0.95, price=100.0, account_balance=10_000.0)
+        pos_lo = size_position(confidence=0.72, price=100.0, account_balance=10_000.0)
         @test pos_hi.units >= pos_lo.units
+
+        @test size_position(confidence=0.90, price=0.0, account_balance=10_000.0).units == 0.0
+        @test size_position(confidence=0.90, price=100.0, account_balance=-1.0).units == 0.0
+    end
+
+    @testset "ExecutionEngine — zero-sized rejection and capped fraction" begin
+        engine = ExecutionEngine(max_position_size=10.0)
+        sig = TradeSignal(Dict("ticker"=>"MARKET-D","side"=>"BUY","price"=>90.0,"quantity"=>1.0,"confidence"=>0.90,"timestamp_ns"=>0))
+        dec = execute_signal!(engine, sig, 10_000.0)
+        @test dec.executed
+        @test dec.position_units == 10.0
+        @test dec.kelly_fraction ≈ 0.09
+
+        zero_dec = execute_signal!(engine, sig, 0.0)
+        @test !zero_dec.executed
+        @test zero_dec.reason == "zero-sized position"
     end
 end

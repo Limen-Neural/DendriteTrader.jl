@@ -69,7 +69,7 @@ using DendriteTrader
 engine = ExecutionEngine(
     confidence_threshold = Float32(0.85),
     max_position_size    = 10.0,
-    payoff_ratio         = 0.01,
+    payoff_ratio         = 1.5,
 )
 ```
 
@@ -124,7 +124,7 @@ using DendriteTrader
 
 fraction = kelly_fraction(win_rate = 0.55, avg_win = 8.50, avg_loss = 5.20)
 half = half_kelly(0.60, 1.5)
-confidence_fraction = from_confidence(confidence = 0.90, payoff_ratio = 0.01)
+confidence_fraction = from_confidence(confidence = 0.90, payoff_ratio = 1.5)
 
 position = size_position(
     confidence = 0.90,
@@ -142,7 +142,7 @@ println(position.risk)
 
 | Type / Function | Description |
 |-----------------|-------------|
-| `kelly_fraction(; win_rate, avg_win, avg_loss)` | Conservative half-Kelly fraction from historical trade statistics, clamped to `[0.02, 0.20]` |
+| `kelly_fraction(; win_rate, avg_win, avg_loss)` | Conservative half-Kelly fraction from historical trade statistics, clamped to `[0.0, 0.20]` |
 | `half_kelly(p, b)` | Half-Kelly fraction for win probability `p` and payoff ratio `b` |
 | `from_confidence(; confidence, payoff_ratio)` | Maps neural confidence directly to a half-Kelly fraction |
 | `RiskTier` | Qualitative risk enum: `Aggressive`, `Moderate`, `Conservative`, `Minimal` |

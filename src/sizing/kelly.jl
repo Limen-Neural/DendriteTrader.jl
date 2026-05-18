@@ -38,11 +38,13 @@ function half_kelly(p::Float64, b::Float64)::Float64
 end
 
 """
-    from_confidence(; confidence, payoff_ratio=0.01) -> Float64
+    from_confidence(; confidence, payoff_ratio=1.5) -> Float64
 
 Map neural confidence `[0, 1]` to a half-Kelly position fraction.
+
+`payoff_ratio` is interpreted as an odds-style average win/loss ratio.
 """
-function from_confidence(; confidence::Float64, payoff_ratio::Float64 = 0.01)::Float64
+function from_confidence(; confidence::Float64, payoff_ratio::Float64 = 1.5)::Float64
     return half_kelly(clamp(confidence, 0.01, 0.99), max(payoff_ratio, 1e-9))
 end
 
@@ -96,25 +98,32 @@ struct PositionSize
 end
 
 """
-    size_position(; confidence, price, account_balance, payoff_ratio=0.01, kelly_scalar=0.5) -> PositionSize
+    size_position(; confidence, price, account_balance, payoff_ratio=1.5, kelly_scalar=0.5) -> PositionSize
 
 Compute position sizing from neural confidence.
+
+`payoff_ratio` is interpreted as an odds-style average win/loss ratio. Non-positive
+prices or balances return a zero-sized position.
 """
 function size_position(;
     confidence::Float64,
     price::Float64,
     account_balance::Float64,
-    payoff_ratio::Float64 = 0.01,
+    payoff_ratio::Float64 = 1.5,
     kelly_scalar::Float64 = 0.5,
 )::PositionSize
+    if price <= 0.0 || account_balance <= 0.0
+        return PositionSize(0.0, 0.0, confidence, risk_tier(confidence), 0.0)
+    end
+
     p = clamp(confidence, 0.01, 0.99)
     b = max(payoff_ratio, 1e-9)
     q = 1.0 - p
     full_k = (p * b - q) / b
     k = clamp(full_k * kelly_scalar, 0.0, 1.0)
 
-    units = (k * account_balance) / max(price, 1e-9)
-    risk_pct = account_balance <= 0.0 ? 0.0 : (units * price) / account_balance * 100.0
+    units = (k * account_balance) / price
+    risk_pct = (units * price) / account_balance * 100.0
 
     return PositionSize(units, k, confidence, risk_tier(confidence), risk_pct)
 end

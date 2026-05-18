@@ -52,6 +52,7 @@ module DendriteTrader
 
 using JSON
 using HTTP
+using ZMQ
 
 export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision
 export execute_signal!, latency_ns, passes_gate
@@ -160,7 +161,7 @@ Stateful execution engine with confidence gating and position management.
 # Fields
 - `confidence_threshold`: minimum SNN confidence to execute (default 0.85)
 - `max_position_size`:    hard cap on position units (default 10.0)
-- `payoff_ratio`:         expected price move for Kelly sizing (default 0.01)
+- `payoff_ratio`:         odds-style average win/loss ratio for Kelly sizing (default 1.5)
 - `positions`:            current open positions (ticker → quantity)
 """
 mutable struct ExecutionEngine
@@ -176,7 +177,7 @@ end
 function ExecutionEngine(;
     confidence_threshold::Float32 = Float32(0.85),
     max_position_size::Float64 = 10.0,
-    payoff_ratio::Float64 = 0.01,
+    payoff_ratio::Float64 = 1.5,
 )
     ExecutionEngine(confidence_threshold, max_position_size, payoff_ratio,
                     Dict{String,Float64}(), 0, 0, 0)
@@ -215,6 +216,13 @@ function execute_signal!(
     )
     units = min(position.units, engine.max_position_size)
 
+    if units <= 0.0
+        engine.rejected_signals += 1
+        return ExecutionDecision(signal, false, "zero-sized position", 0.0, 0.0, lat)
+    end
+
+    applied_fraction = account_balance <= 0.0 ? 0.0 : (units * signal.price) / account_balance
+
     # Update position book
     current = get(engine.positions, signal.ticker, 0.0)
     if signal.side == Buy
@@ -224,7 +232,7 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
-    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, units, lat)
+    return ExecutionDecision(signal, true, "executed", applied_fraction, units, lat)
 end
 
 """
@@ -344,27 +352,24 @@ function start!(
     account_balance::Float64 = 10_000.0,
     on_decision = decision -> nothing,
 )
-    # Lazy-load ZMQ to keep the package installable without it
-    zmq = Base.require(Main, :ZMQ)
-
-    ctx = zmq.Context()
-    socket = zmq.Socket(ctx, zmq.SUB)
-    zmq.subscribe(socket, "")
-    zmq.connect(socket, zmq_endpoint)
+    ctx = ZMQ.Context()
+    socket = ZMQ.Socket(ctx, ZMQ.SUB)
+    ZMQ.subscribe(socket, "")
+    ZMQ.connect(socket, zmq_endpoint)
 
     @info "[execution] ZMQ SUB connected to $zmq_endpoint"
 
     try
         while true
-            msg = zmq.recv(socket)
+            msg = ZMQ.recv(socket)
             data = JSON.parse(String(msg))
             signal = TradeSignal(data)
             decision = execute_signal!(engine, signal, account_balance)
             on_decision(decision)
         end
     finally
-        zmq.close(socket)
-        zmq.close(ctx)
+        ZMQ.close(socket)
+        ZMQ.close(ctx)
     end
 end
 
