@@ -9,7 +9,7 @@ Compute a conservative half-Kelly position fraction from historical trade statis
 - `avg_loss`: average loss of losing trades as an absolute value
 
 # Returns
-Half-Kelly fraction clamped to `[0.02, 0.20]`.
+Half-Kelly fraction clamped to `[0.0, 0.20]`.
 """
 function kelly_fraction(; win_rate::Float64, avg_win::Float64, avg_loss::Float64)::Float64
     win_rate = clamp(win_rate, 0.01, 0.99)
@@ -21,7 +21,7 @@ function kelly_fraction(; win_rate::Float64, avg_win::Float64, avg_loss::Float64
     full = (win_rate * b - q) / b
     half = full * 0.5
 
-    return clamp(half, 0.02, 0.20)
+    return clamp(half, 0.0, 0.20)
 end
 
 """

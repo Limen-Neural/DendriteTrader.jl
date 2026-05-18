@@ -56,7 +56,7 @@ using DendriteTrader
         @test f > 0.05
 
         f_bad = kelly_fraction(win_rate=0.40, avg_win=1.0, avg_loss=2.0)
-        @test f_bad == 0.02
+        @test f_bad == 0.0
 
         f_hi = kelly_fraction(win_rate=0.70, avg_win=10.0, avg_loss=5.0)
         f_lo = kelly_fraction(win_rate=0.52, avg_win=10.0, avg_loss=5.0)
