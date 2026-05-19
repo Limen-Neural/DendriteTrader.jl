@@ -1,13 +1,13 @@
 """
-    SpikenautExecution
+    DendriteTrader
 
-Async trade signal pipeline: ZMQ SUB → confidence gating → Kelly sizing → dYdX v4 REST execution.
+Julia strategy, diagnostics, paper-trading, and control-plane layer for neural trading systems.
 
-Bridges Julia SNN strategy output to live decentralized exchange execution with:
+Bridges Julia SNN strategy output to trading decisions with:
 - ZMQ SUB socket for JSON trade signals from Rust nervous system
 - Nanosecond latency tracking (signal creation → execution)
 - Confidence gate (only executes signals above threshold)
-- Kelly position sizing via SpikenautKelly
+- Integrated Kelly/fractional-Kelly position sizing
 - dYdX v4 decentralized perpetuals REST client (no API key required)
 
 ## Architecture
@@ -21,7 +21,8 @@ LIF neurons → SNN signal → ZMQ bridge → Kelly sizing → dydx v4 → Order
 
 ## Provenance
 
-Developed as a standalone async execution pipeline for custom neuromorphic SNN models and high-frequency ML integrations.
+Developed as a Julia control-plane and paper-trading package for custom neuromorphic SNN models and ML trading integrations.
+Latency-critical execution loops remain the responsibility of adjacent Rust services.
 
 ## References
 
@@ -41,20 +42,27 @@ Developed as a standalone async execution pipeline for custom neuromorphic SNN m
 ## Usage
 
 ```julia
-using SpikenautExecution
+using DendriteTrader
 
 engine = ExecutionEngine(confidence_threshold=0.85)
 start!(engine, zmq_endpoint="tcp://localhost:5555")
 ```
 """
-module SpikenautExecution
+module DendriteTrader
 
 using JSON
+using HTTP
+using ZMQ
 
-export TradeSignal, TradeSide, ExecutionEngine, ExecutionDecision
+export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision
 export execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
-export start!
+export start!, fill_rate
+export kelly_fraction, from_confidence, half_kelly
+export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
+export PositionSize, size_position
+
+include("sizing/kelly.jl")
 
 # ── Trade Signal ─────────────────────────────────────────────────────────────
 
@@ -75,7 +83,7 @@ end
 Deserialized trade signal from Rust nervous system via ZMQ.
 
 # Fields
-- `ticker`:       asset symbol (e.g. "BTC-USD", "DNX-USDT")
+- `ticker`:       configurable venue symbol
 - `side`:         Buy / Sell / Neutral
 - `price`:        expected execution price (USD)
 - `quantity`:     units to trade (Kelly-sized by Rust, override in Julia)
@@ -139,6 +147,7 @@ struct ExecutionDecision
     executed::Bool
     reason::String
     kelly_fraction::Float64
+    applied_fraction::Float64
     position_units::Float64
     latency_ns::Int64
 end
@@ -153,7 +162,7 @@ Stateful execution engine with confidence gating and position management.
 # Fields
 - `confidence_threshold`: minimum SNN confidence to execute (default 0.85)
 - `max_position_size`:    hard cap on position units (default 10.0)
-- `payoff_ratio`:         expected price move for Kelly sizing (default 0.01)
+- `payoff_ratio`:         odds-style average win/loss ratio for Kelly sizing (default 1.5)
 - `positions`:            current open positions (ticker → quantity)
 """
 mutable struct ExecutionEngine
@@ -169,7 +178,7 @@ end
 function ExecutionEngine(;
     confidence_threshold::Float32 = Float32(0.85),
     max_position_size::Float64 = 10.0,
-    payoff_ratio::Float64 = 0.01,
+    payoff_ratio::Float64 = 1.5,
 )
     ExecutionEngine(confidence_threshold, max_position_size, payoff_ratio,
                     Dict{String,Float64}(), 0, 0, 0)
@@ -192,22 +201,28 @@ function execute_signal!(
         engine.rejected_signals += 1
         return ExecutionDecision(signal, false,
             "confidence=$(signal.confidence) < threshold=$(engine.confidence_threshold)",
-            0.0, 0.0, lat)
+            0.0, 0.0, 0.0, lat)
     end
 
     if signal.side == Neutral
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false, "neutral signal", 0.0, 0.0, lat)
+        return ExecutionDecision(signal, false, "neutral signal", 0.0, 0.0, 0.0, lat)
     end
 
-    # Kelly position sizing
-    p = Float64(signal.confidence)
-    b = engine.payoff_ratio
-    q = 1.0 - p
-    full_k = (p * b - q) / b
-    k = clamp(full_k * 0.5, 0.0, 1.0)  # half-Kelly
+    position = size_position(
+        confidence = Float64(signal.confidence),
+        price = signal.price,
+        account_balance = account_balance,
+        payoff_ratio = engine.payoff_ratio,
+    )
+    units = min(position.units, engine.max_position_size)
 
-    units = min((k * account_balance) / max(signal.price, 1e-9), engine.max_position_size)
+    if units <= 0.0
+        engine.rejected_signals += 1
+        return ExecutionDecision(signal, false, "zero-sized position", position.kelly_fraction, 0.0, 0.0, lat)
+    end
+
+    applied_fraction = account_balance <= 0.0 ? 0.0 : (units * signal.price) / account_balance
 
     # Update position book
     current = get(engine.positions, signal.ticker, 0.0)
@@ -218,7 +233,7 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
-    return ExecutionDecision(signal, true, "executed", k, units, lat)
+    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, applied_fraction, units, lat)
 end
 
 """
@@ -260,7 +275,7 @@ spread_bps(p::DydxPrice) = max(p.best_ask - p.best_bid, 0.0) / max(p.best_ask, 1
 """
     DydxClient
 
-REST client for dYdX v4 perpetuals (no API key required for read-only).
+REST client for dYdX v4 perpetuals (no API key required for read-only market data).
 """
 struct DydxClient
     base_url::String
@@ -273,7 +288,7 @@ DydxClient(; base_url::String = "https://indexer.dydx.trade/v4",
 """
     get_price(client, ticker) -> Union{DydxPrice, Nothing}
 
-Fetch current oracle price and order book top for `ticker` (e.g. "BTC-USD").
+Fetch current oracle price and order book top for `ticker`.
 Returns `nothing` on network error.
 """
 function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing}
@@ -338,27 +353,24 @@ function start!(
     account_balance::Float64 = 10_000.0,
     on_decision = decision -> nothing,
 )
-    # Lazy-load ZMQ to keep the package installable without it
-    zmq = Base.require(Main, :ZMQ)
-
-    ctx = zmq.Context()
-    socket = zmq.Socket(ctx, zmq.SUB)
-    zmq.subscribe(socket, "")
-    zmq.connect(socket, zmq_endpoint)
+    ctx = ZMQ.Context()
+    socket = ZMQ.Socket(ctx, ZMQ.SUB)
+    ZMQ.subscribe(socket, "")
+    ZMQ.connect(socket, zmq_endpoint)
 
     @info "[execution] ZMQ SUB connected to $zmq_endpoint"
 
     try
         while true
-            msg = zmq.recv(socket)
+            msg = ZMQ.recv(socket)
             data = JSON.parse(String(msg))
             signal = TradeSignal(data)
             decision = execute_signal!(engine, signal, account_balance)
             on_decision(decision)
         end
     finally
-        zmq.close(socket)
-        zmq.close(ctx)
+        ZMQ.close(socket)
+        ZMQ.close(ctx)
     end
 end
 
