@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 """
     kelly_fraction(; win_rate, avg_win, avg_loss) -> Float64
 

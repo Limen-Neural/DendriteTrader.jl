@@ -1,5 +1,7 @@
 # DendriteTrader
 
+[![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](https://github.com/Limen-Neural/DendriteTrader.jl/blob/main/LICENSE)
+
 Julia strategy, diagnostics, paper-trading, and control-plane tooling for neural trading systems.
 
 DendriteTrader consumes neural trade signals, applies confidence gating, sizes positions with integrated Kelly/fractional-Kelly helpers, tracks paper positions, and exposes read-only market-data utilities. It is intentionally scoped as the Julia-side control-plane layer; deterministic low-latency execution loops belong in Rust services such as `corpus-ipc` and adjacent ledger infrastructure such as `metabolic-ledger`.
@@ -23,7 +25,16 @@ DendriteTrader is for Julia-side strategy and control-plane responsibilities:
 - Read-only market data helpers
 - Human-readable experimentation and test coverage around neural confidence signals
 
-DendriteTrader is **not** the deterministic HFT execution runtime. Latency-critical production execution, IPC loops, and venue-critical paths should remain in Rust services, including `corpus-ipc`. Persistent portfolio/accounting boundaries should be handled by adjacent infrastructure such as `metabolic-ledger`.
+DendriteTrader is **not** the deterministic HFT execution runtime. Latency-critical production execution, IPC loops, and venue-critical paths should remain in Rust services, including `corpus-ipc`.
+
+**Ownership split with `metabolic-ledger`:**
+
+| Repo | Owns |
+|------|------|
+| **DendriteTrader.jl** | `TradeSignal`, confidence gate, Kelly sizing proposals (`kelly_fraction`, `from_confidence`, `PositionSize`), dYdX v4 REST client, ZMQ SUB consumer — **signal → decision only** |
+| **metabolic-ledger** | `GhostWallet`, buy/sell state transitions, ATP energy, `GhostTradeLog`, realized PnL, win/loss tracking — **persistent accounting** |
+
+See the module docstring in `src/DendriteTrader.jl` for the explicit boundary declaration.
 
 ## Ecosystem
 
@@ -236,4 +247,8 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+Dual-licensed under MIT or Apache-2.0.
+
+- See [`LICENSE-MIT`](LICENSE-MIT)
+- See [`LICENSE-APACHE-2.0`](LICENSE-APACHE-2.0)
+- Or [`LICENSE`](LICENSE) for the dual-license declaration.

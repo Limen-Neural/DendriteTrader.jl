@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 """
     DendriteTrader
 
@@ -24,6 +26,20 @@ LIF neurons → SNN signal → ZMQ bridge → Kelly sizing → dydx v4 → Order
 Developed as a Julia control-plane and paper-trading package for custom neuromorphic SNN models and ML trading integrations.
 Latency-critical execution loops remain the responsibility of adjacent Rust services.
 
+## Repository Boundary
+
+DendriteTrader owns:
+- `TradeSignal`, confidence gating, `ExecutionDecision`
+- Kelly sizing proposals (`kelly_fraction`, `from_confidence`, `PositionSize`, `size_position`)
+- dYdX v4 REST client (read-only market data)
+- ZMQ SUB consumer — signal → decision only
+
+DendriteTrader does **NOT** own:
+- `GhostWallet`-like persistent accounting state
+- Win rate, realized PnL, portfolio position tracking
+
+Win-rate/PnL tracking belongs in `metabolic-ledger`.
+
 ## References
 
 - Kelly, J.L. (1956). A New Interpretation of Information Rate.
@@ -48,6 +64,7 @@ engine = ExecutionEngine(confidence_threshold=0.85)
 start!(engine, zmq_endpoint="tcp://localhost:5555")
 ```
 """
+
 module DendriteTrader
 
 using JSON
