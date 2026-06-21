@@ -23,7 +23,18 @@ DendriteTrader is for Julia-side strategy and control-plane responsibilities:
 - Read-only market data helpers
 - Human-readable experimentation and test coverage around neural confidence signals
 
-DendriteTrader is **not** the deterministic HFT execution runtime. Latency-critical production execution, IPC loops, and venue-critical paths should remain in Rust services, including `corpus-ipc`. Persistent portfolio/accounting boundaries should be handled by adjacent infrastructure such as `metabolic-ledger`.
+DendriteTrader is **not** the deterministic HFT execution runtime. Latency-critical production execution, IPC loops, and venue-critical paths should remain in Rust services, including `corpus-ipc`.
+
+**Ownership split with `metabolic-ledger`:**
+
+| Repo | Owns |
+|------|------|
+| **DendriteTrader.jl** | `TradeSignal`, confidence gate, Kelly sizing proposals (`kelly_fraction`, `from_confidence`, `PositionSize`), dYdX v4 REST client, ZMQ SUB consumer — **signal → decision only** |
+| **metabolic-ledger** | `GhostWallet`, buy/sell state transitions, ATP energy, `GhostTradeLog`, realized PnL, win/loss tracking — **persistent accounting** |
+
+See the module docstring in `src/DendriteTrader.jl` for the explicit boundary declaration. Win-rate/PnL tracking belongs in `metabolic-ledger`.
+
+Persistent portfolio/accounting boundaries should be handled by adjacent infrastructure such as `metabolic-ledger`.
 
 ## Ecosystem
 
