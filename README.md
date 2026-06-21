@@ -1,5 +1,7 @@
 # DendriteTrader
 
+[![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](https://github.com/Limen-Neural/DendriteTrader.jl/blob/main/LICENSE)
+
 Julia strategy, diagnostics, paper-trading, and control-plane tooling for neural trading systems.
 
 DendriteTrader consumes neural trade signals, applies confidence gating, sizes positions with integrated Kelly/fractional-Kelly helpers, tracks paper positions, and exposes read-only market-data utilities. It is intentionally scoped as the Julia-side control-plane layer; deterministic low-latency execution loops belong in Rust services such as `corpus-ipc` and adjacent ledger infrastructure such as `metabolic-ledger`.
@@ -245,4 +247,8 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+Dual-licensed under MIT or Apache-2.0.
+
+- See [`LICENSE-MIT`](LICENSE-MIT)
+- See [`LICENSE-APACHE-2.0`](LICENSE-APACHE-2.0)
+- Or [`LICENSE`](LICENSE) for the dual-license declaration.
