@@ -32,9 +32,7 @@ DendriteTrader is **not** the deterministic HFT execution runtime. Latency-criti
 | **DendriteTrader.jl** | `TradeSignal`, confidence gate, Kelly sizing proposals (`kelly_fraction`, `from_confidence`, `PositionSize`), dYdX v4 REST client, ZMQ SUB consumer — **signal → decision only** |
 | **metabolic-ledger** | `GhostWallet`, buy/sell state transitions, ATP energy, `GhostTradeLog`, realized PnL, win/loss tracking — **persistent accounting** |
 
-See the module docstring in `src/DendriteTrader.jl` for the explicit boundary declaration. Win-rate/PnL tracking belongs in `metabolic-ledger`.
-
-Persistent portfolio/accounting boundaries should be handled by adjacent infrastructure such as `metabolic-ledger`.
+See the module docstring in `src/DendriteTrader.jl` for the explicit boundary declaration.
 
 ## Ecosystem
 
