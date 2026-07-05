@@ -3,6 +3,8 @@
 using Test
 using DendriteTrader
 
+include("test_signal_validation.jl")
+
 @testset "DendriteTrader" begin
     @testset "TradeSignal" begin
         d = Dict(
