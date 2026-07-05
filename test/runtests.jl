@@ -176,3 +176,6 @@ using DendriteTrader
         @test zero_dec.reason == "zero-sized position"
     end
 end
+
+# Integration tests (gated behind DYDX_INTEGRATION=true)
+include("integration/test_dydx.jl")

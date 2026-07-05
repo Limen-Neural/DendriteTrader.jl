@@ -81,7 +81,8 @@ export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
 export PositionSize, size_position
 
-include("sizing/kelly.jl")
+include("sizing/SizingModule.jl")
+using .SizingModule
 
 # ── Trade Signal ─────────────────────────────────────────────────────────────
 
