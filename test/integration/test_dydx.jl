@@ -68,6 +68,16 @@ using DendriteTrader
         @test price === nothing
     end
 
+    @testset "get_price — timeout/network failure returns nothing" begin
+        # Use a very small timeout and a reserved non-routable test IP to exercise timeout handling.
+        client_timeout = DydxClient(
+            base_url = "http://192.0.2.1/v4",
+            timeout_s = 0.01,
+        )
+        price = get_price(client_timeout, "BTC-USD")
+        @test price === nothing
+    end
+
     @testset "rate limiter" begin
         client_limited = DydxClient(
             base_url = "https://indexer.v4testnet.dydx.exchange/v4",

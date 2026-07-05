@@ -511,6 +511,12 @@ end
 Create a rate limiter with the given requests per second and burst capacity.
 """
 function RateLimiter(; requests_per_second::Float64 = 10.0, burst::Float64 = 10.0)
+    if requests_per_second <= 0
+        throw(ArgumentError("requests_per_second must be > 0, got: $requests_per_second"))
+    end
+    if burst <= 0
+        throw(ArgumentError("burst must be > 0, got: $burst"))
+    end
     RateLimiter(burst, burst, requests_per_second, time(), ReentrantLock())
 end
 
@@ -522,6 +528,10 @@ Thread-safe via ReentrantLock.
 """
 function acquire!(limiter::RateLimiter)
     lock(limiter.lock) do
+        if limiter.refill_rate <= 0
+            throw(ArgumentError("refill_rate must be > 0, got: $(limiter.refill_rate)"))
+        end
+
         now = time()
         elapsed = now - limiter.last_refill
         limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
@@ -530,11 +540,15 @@ function acquire!(limiter::RateLimiter)
         if limiter.tokens < 1.0
             wait_time = (1.0 - limiter.tokens) / limiter.refill_rate
             sleep(wait_time)
-            limiter.tokens = 0.0
-            limiter.last_refill = time()
-        else
-            limiter.tokens -= 1.0
+
+            # Refill again after sleep (preserve any fractional credit)
+            now2 = time()
+            elapsed2 = now2 - limiter.last_refill
+            limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed2 * limiter.refill_rate)
+            limiter.last_refill = now2
         end
+
+        limiter.tokens = max(0.0, limiter.tokens - 1.0)
     end
 end
 
@@ -544,6 +558,10 @@ end
 Update the rate limit at runtime.
 """
 function set_rate!(limiter::RateLimiter, requests_per_second::Float64)
+    if requests_per_second <= 0
+        throw(ArgumentError("requests_per_second must be > 0, got: $requests_per_second"))
+    end
+
     lock(limiter.lock) do
         # Refill tokens based on current state before changing rate
         now = time()
@@ -551,8 +569,8 @@ function set_rate!(limiter::RateLimiter, requests_per_second::Float64)
         limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
         limiter.last_refill = now
 
+        # Preserve burst capacity (max_tokens) and only change refill behavior.
         limiter.refill_rate = requests_per_second
-        limiter.max_tokens = requests_per_second
     end
 end
 
@@ -797,6 +815,9 @@ function start!(
     on_decision = decision -> nothing,
     timeout_s::Union{Float64, Nothing} = nothing,
 )
+    # Allow engine reuse across stop/start cycles.
+    Threads.atomic_store!(engine.should_stop, false)
+
     ctx = ZMQ.Context()
     socket = ZMQ.Socket(ctx, ZMQ.SUB)
     ZMQ.subscribe(socket, "")
