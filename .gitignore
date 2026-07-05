@@ -1,5 +1,3 @@
 .kilo/
+.mimo/
 Manifest.toml
-*.jl.cov
-*.jl.*.cov
-*.jl.mem
