@@ -89,8 +89,8 @@ include("sizing/kelly.jl")
 Direction of a trade signal.
 """
 @enum TradeSide begin
-    Buy     = 1
-    Sell    = 2
+    Buy = 1
+    Sell = 2
     Neutral = 0
 end
 
@@ -197,8 +197,15 @@ function ExecutionEngine(;
     max_position_size::Float64 = 10.0,
     payoff_ratio::Float64 = 1.5,
 )
-    ExecutionEngine(confidence_threshold, max_position_size, payoff_ratio,
-                    Dict{String,Float64}(), 0, 0, 0)
+    ExecutionEngine(
+        confidence_threshold,
+        max_position_size,
+        payoff_ratio,
+        Dict{String, Float64}(),
+        0,
+        0,
+        0,
+    )
 end
 
 """
@@ -216,9 +223,15 @@ function execute_signal!(
 
     if !passes_gate(signal, engine.confidence_threshold)
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false,
+        return ExecutionDecision(
+            signal,
+            false,
             "confidence=$(signal.confidence) < threshold=$(engine.confidence_threshold)",
-            0.0, 0.0, 0.0, lat)
+            0.0,
+            0.0,
+            0.0,
+            lat,
+        )
     end
 
     if signal.side == Neutral
@@ -236,7 +249,15 @@ function execute_signal!(
 
     if units <= 0.0
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false, "zero-sized position", position.kelly_fraction, 0.0, 0.0, lat)
+        return ExecutionDecision(
+            signal,
+            false,
+            "zero-sized position",
+            position.kelly_fraction,
+            0.0,
+            0.0,
+            lat,
+        )
     end
 
     applied_fraction = account_balance <= 0.0 ? 0.0 : (units * signal.price) / account_balance
@@ -250,7 +271,15 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
-    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, applied_fraction, units, lat)
+    return ExecutionDecision(
+        signal,
+        true,
+        "executed",
+        position.kelly_fraction,
+        applied_fraction,
+        units,
+        lat,
+    )
 end
 
 """
@@ -258,8 +287,7 @@ end
 
 Fraction of signals that were executed (not rejected).
 """
-fill_rate(e::ExecutionEngine) =
-    e.total_signals == 0 ? 0.0 : e.executed_signals / e.total_signals
+fill_rate(e::ExecutionEngine) = e.total_signals == 0 ? 0.0 : e.executed_signals / e.total_signals
 
 # ── dYdX v4 REST Client ───────────────────────────────────────────────────────
 
@@ -299,8 +327,8 @@ struct DydxClient
     timeout_s::Float64
 end
 
-DydxClient(; base_url::String = "https://indexer.dydx.trade/v4",
-             timeout_s::Float64 = 5.0) = DydxClient(base_url, timeout_s)
+DydxClient(; base_url::String = "https://indexer.dydx.trade/v4", timeout_s::Float64 = 5.0) =
+    DydxClient(base_url, timeout_s)
 
 """
     get_price(client, ticker) -> Union{DydxPrice, Nothing}
@@ -311,7 +339,7 @@ Returns `nothing` on network error.
 function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing}
     try
         url = "$(client.base_url)/orderbooks/perpetualMarket/$(ticker)"
-        resp = HTTP.get(url; readtimeout=client.timeout_s)
+        resp = HTTP.get(url; readtimeout = client.timeout_s)
         data = JSON.parse(String(resp.body))
 
         bids = get(data, "bids", [])
@@ -322,7 +350,7 @@ function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing
 
         # Oracle price from markets endpoint
         market_url = "$(client.base_url)/perpetualMarkets?ticker=$(ticker)"
-        market_resp = HTTP.get(market_url; readtimeout=client.timeout_s)
+        market_resp = HTTP.get(market_url; readtimeout = client.timeout_s)
         market_data = JSON.parse(String(market_resp.body))
         markets = get(market_data, "markets", Dict())
         oracle = if haskey(markets, ticker)
