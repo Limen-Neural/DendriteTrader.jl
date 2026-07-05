@@ -74,6 +74,7 @@ using ZMQ
 export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision, SignalEvent
 export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
+export RateLimiter, acquire!, set_rate!
 export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
@@ -472,6 +473,74 @@ Bid-ask spread in basis points.
 """
 spread_bps(p::DydxPrice) = max(p.best_ask - p.best_bid, 0.0) / max(p.best_ask, 1e-9) * 10_000.0
 
+# ── Rate Limiter ──────────────────────────────────────────────────────────────
+
+"""
+    RateLimiter
+
+Token bucket rate limiter for API calls.
+
+# Fields
+- `tokens`:        current available tokens
+- `max_tokens`:    maximum token capacity
+- `refill_rate`:   tokens added per second
+- `last_refill`:   timestamp of last refill
+"""
+mutable struct RateLimiter
+    tokens::Float64
+    max_tokens::Float64
+    refill_rate::Float64
+    last_refill::Float64
+end
+
+"""
+    RateLimiter(; requests_per_second=10.0, burst=10.0)
+
+Create a rate limiter with the given requests per second and burst capacity.
+"""
+function RateLimiter(; requests_per_second::Float64 = 10.0, burst::Float64 = 10.0)
+    RateLimiter(burst, burst, requests_per_second, time())
+end
+
+"""
+    acquire!(limiter)
+
+Block until a token is available. Refills tokens based on elapsed time.
+"""
+function acquire!(limiter::RateLimiter)
+    now = time()
+    elapsed = now - limiter.last_refill
+    limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
+    limiter.last_refill = now
+
+    if limiter.tokens < 1.0
+        wait_time = (1.0 - limiter.tokens) / limiter.refill_rate
+        sleep(wait_time)
+        limiter.tokens = 0.0
+        limiter.last_refill = time()
+    else
+        limiter.tokens -= 1.0
+    end
+end
+
+"""
+    set_rate!(limiter, requests_per_second)
+
+Update the rate limit at runtime.
+"""
+function set_rate!(limiter::RateLimiter, requests_per_second::Float64)
+    # Refill tokens based on current state before changing rate
+    now = time()
+    elapsed = now - limiter.last_refill
+    limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
+    limiter.last_refill = now
+
+    limiter.refill_rate = requests_per_second
+    limiter.max_tokens = requests_per_second
+end
+
+# ── dYdX v4 REST Client ───────────────────────────────────────────────────────
+
 """
     DydxClient
 
@@ -480,10 +549,21 @@ REST client for dYdX v4 perpetuals (no API key required for read-only market dat
 struct DydxClient
     base_url::String
     timeout_s::Float64
+    rate_limiter::Union{RateLimiter, Nothing}
 end
 
-DydxClient(; base_url::String = "https://indexer.dydx.trade/v4", timeout_s::Float64 = 5.0) =
-    DydxClient(base_url, timeout_s)
+"""
+    DydxClient(; base_url, timeout_s, rate_limit)
+
+Create a dYdX client. Pass `rate_limit=RateLimiter()` to enable rate limiting.
+"""
+function DydxClient(;
+    base_url::String = "https://indexer.dydx.trade/v4",
+    timeout_s::Float64 = 5.0,
+    rate_limit::Union{RateLimiter, Nothing} = nothing,
+)
+    DydxClient(base_url, timeout_s, rate_limit)
+end
 
 """
     get_price(client, ticker) -> Union{DydxPrice, Nothing}
@@ -493,6 +573,11 @@ Returns `nothing` on network error.
 """
 function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing}
     try
+        # Rate limit if configured
+        if client.rate_limiter !== nothing
+            acquire!(client.rate_limiter)
+        end
+
         url = "$(client.base_url)/orderbooks/perpetualMarket/$(ticker)"
         resp = HTTP.get(url; readtimeout = client.timeout_s)
         data = JSON.parse(String(resp.body))
@@ -502,6 +587,11 @@ function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing
 
         best_bid = isempty(bids) ? 0.0 : parse(Float64, first(bids)["price"])
         best_ask = isempty(asks) ? 0.0 : parse(Float64, first(asks)["price"])
+
+        # Rate limit for second call
+        if client.rate_limiter !== nothing
+            acquire!(client.rate_limiter)
+        end
 
         # Oracle price from markets endpoint
         market_url = "$(client.base_url)/perpetualMarkets?ticker=$(ticker)"
