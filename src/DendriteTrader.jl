@@ -74,7 +74,7 @@ using ZMQ
 export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision
 export execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
-export start!, fill_rate
+export start!, stop!, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
 export PositionSize, size_position
@@ -190,6 +190,7 @@ mutable struct ExecutionEngine
     total_signals::Int
     executed_signals::Int
     rejected_signals::Int
+    should_stop::Bool
 end
 
 function ExecutionEngine(;
@@ -205,7 +206,19 @@ function ExecutionEngine(;
         0,
         0,
         0,
+        false,
     )
+end
+
+"""
+    stop!(engine)
+
+Signal the engine to stop its ZMQ listener loop.
+
+Call this from another task or thread to gracefully shut down `start!`.
+"""
+function stop!(engine::ExecutionEngine)
+    engine.should_stop = true
 end
 
 """
@@ -369,7 +382,7 @@ end
 # ── ZMQ Signal Listener ───────────────────────────────────────────────────────
 
 """
-    start!(engine; zmq_endpoint, account_balance, on_decision)
+    start!(engine; zmq_endpoint, account_balance, on_decision, timeout_s)
 
 Start the ZMQ SUB listener loop (requires ZMQ.jl).
 
@@ -381,15 +394,25 @@ through the execution engine, calling `on_decision` for each result.
 - `zmq_endpoint`:    ZMQ endpoint (e.g. "tcp://localhost:5555" or "ipc:///tmp/signals.ipc")
 - `account_balance`: account size for Kelly sizing
 - `on_decision`:     callback `(ExecutionDecision) -> Nothing`
+- `timeout_s`:       total seconds to run before auto-stopping (nothing = run forever)
+
+# Shutdown
+
+Call `stop!(engine)` from another task to gracefully stop the listener.
+The loop checks `engine.should_stop` periodically.
 
 # Example
 ```julia
 engine = ExecutionEngine(confidence_threshold=Float32(0.85))
-start!(engine, zmq_endpoint="tcp://localhost:5555") do decision
-    if decision.executed
-        println("Executed: \$(decision.signal.ticker) x\$(round(decision.position_units, digits=4))")
-    end
+
+# Run in background task
+t = @async start!(engine, zmq_endpoint="tcp://localhost:5555") do decision
+    println("Decision: \$(decision.executed)")
 end
+
+# Stop after 60 seconds
+sleep(60)
+stop!(engine)
 ```
 """
 function start!(
@@ -397,25 +420,45 @@ function start!(
     zmq_endpoint::String = "tcp://localhost:5555",
     account_balance::Float64 = 10_000.0,
     on_decision = decision -> nothing,
+    timeout_s::Union{Float64, Nothing} = nothing,
 )
     ctx = ZMQ.Context()
     socket = ZMQ.Socket(ctx, ZMQ.SUB)
     ZMQ.subscribe(socket, "")
     ZMQ.connect(socket, zmq_endpoint)
 
+    # Set receive timeout to 1 second so we can check should_stop periodically
+    ZMQ.set_rcvtimeo(socket, 1000)
+
     @info "[execution] ZMQ SUB connected to $zmq_endpoint"
 
+    start_time = time()
     try
-        while true
-            msg = ZMQ.recv(socket)
-            data = JSON.parse(String(msg))
-            signal = TradeSignal(data)
-            decision = execute_signal!(engine, signal, account_balance)
-            on_decision(decision)
+        while !engine.should_stop
+            if timeout_s !== nothing && (time() - start_time) >= timeout_s
+                @info "[execution] Timeout reached, stopping listener"
+                break
+            end
+
+            try
+                msg = ZMQ.recv(socket)
+                data = JSON.parse(String(msg))
+                signal = TradeSignal(data)
+                decision = execute_signal!(engine, signal, account_balance)
+                on_decision(decision)
+            catch e
+                if e isa ZMQ.TimeoutError
+                    # recv timeout, loop back to check should_stop
+                    continue
+                else
+                    rethrow(e)
+                end
+            end
         end
     finally
         ZMQ.close(socket)
         ZMQ.close(ctx)
+        @info "[execution] ZMQ listener stopped"
     end
 end
 
