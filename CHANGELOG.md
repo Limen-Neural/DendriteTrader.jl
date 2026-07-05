@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `LICENSE-MIT` and `LICENSE-APACHE-2.0`.
   - Updated top-level `LICENSE` to declare dual licensing.
   - Updated README.md License section and added SPDX identifiers to source.
+  - Added `license` field to `Project.toml` with SPDX expression.
   - This change is for maximum adoption across research, hardware, BCI, HFT, and bindings.
 
-See issue #10.
+See issues #10 and #11.
