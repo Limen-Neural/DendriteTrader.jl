@@ -24,6 +24,7 @@ print_summary(result)
 """
 module Backtest
 
+using JSON
 using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent
 
 export BacktestConfig, BacktestResult
@@ -40,14 +41,12 @@ Configuration for backtest runs.
 - `initial_balance`: starting account balance (default 10,000)
 - `confidence_threshold`: minimum signal confidence to execute (default 0.85)
 - `payoff_ratio`: odds-style average win/loss ratio for Kelly sizing (default 1.5)
-- `kelly_scalar`: scalar applied to Kelly fraction (default 0.5)
 - `max_position_size`: hard cap on position units (default 10.0)
 """
 struct BacktestConfig
     initial_balance::Float64
     confidence_threshold::Float32
     payoff_ratio::Float64
-    kelly_scalar::Float64
     max_position_size::Float64
 end
 
@@ -55,10 +54,9 @@ function BacktestConfig(;
     initial_balance::Float64 = 10_000.0,
     confidence_threshold::Float32 = Float32(0.85),
     payoff_ratio::Float64 = 1.5,
-    kelly_scalar::Float64 = 0.5,
     max_position_size::Float64 = 10.0,
 )
-    BacktestConfig(initial_balance, confidence_threshold, payoff_ratio, kelly_scalar, max_position_size)
+    BacktestConfig(initial_balance, confidence_threshold, payoff_ratio, max_position_size)
 end
 
 """
@@ -134,11 +132,12 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     for signal in signals
         decision = execute_signal!(engine, signal, balance)
 
-        # Update equity curve
-        push!(equity_curve, balance)
-
         # Record trade if executed
         if decision.executed
+            # Update balance: subtract cost of position
+            cost = decision.position_units * signal.price
+            balance -= cost
+
             trade = TradeRecord(
                 signal.ticker,
                 string(signal.side),
@@ -150,6 +149,9 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
             )
             push!(trade_log, trade)
         end
+
+        # Update equity curve after processing
+        push!(equity_curve, balance)
     end
 
     final_balance = balance
