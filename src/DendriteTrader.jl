@@ -80,6 +80,8 @@ export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
 export PositionSize, size_position
+export BacktestConfig, BacktestResult, run_backtest, print_summary
+export load_signals_json, load_signals_csv, export_equity_csv, export_trade_log_json
 
 include("sizing/SizingModule.jl")
 using .SizingModule
@@ -827,5 +829,10 @@ function start!(
         @info "[execution] ZMQ listener stopped"
     end
 end
+
+# ── Backtest Harness ──────────────────────────────────────────────────────────
+
+include("backtest/Backtest.jl")
+using .Backtest
 
 end # module
