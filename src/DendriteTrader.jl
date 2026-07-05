@@ -72,7 +72,7 @@ using HTTP
 using ZMQ
 
 export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision
-export execute_signal!, latency_ns, passes_gate
+export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
 export start!, stop!, fill_rate
 export kelly_fraction, from_confidence, half_kelly
@@ -114,6 +114,68 @@ struct TradeSignal
     quantity::Float64
     confidence::Float32
     timestamp_ns::Int64
+end
+
+"""
+    validate_signal(d::Dict) -> Union{Nothing, String}
+
+Validate a trade signal dictionary. Returns `nothing` if valid, or an error message string.
+
+# Required Fields
+- `ticker`: String, non-empty
+- `side`: "BUY", "SELL", or "NEUTRAL"
+- `price`: Number > 0
+- `confidence`: Number in [0.0, 1.0]
+- `timestamp_ns`: Integer > 0
+"""
+function validate_signal(d::Dict)
+    # Check required fields
+    for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
+        if !haskey(d, field)
+            return "missing required field: $field"
+        end
+    end
+
+    # Validate ticker
+    ticker = d["ticker"]
+    if !(ticker isa AbstractString) || isempty(ticker)
+        return "ticker must be a non-empty string"
+    end
+
+    # Validate side
+    side = d["side"]
+    if !(side isa AbstractString) || !(side in ("BUY", "SELL", "NEUTRAL"))
+        return "side must be BUY, SELL, or NEUTRAL, got: $side"
+    end
+
+    # Validate price
+    price = d["price"]
+    if !(price isa Number)
+        return "price must be a number, got: $(typeof(price))"
+    end
+    if price <= 0
+        return "price must be positive, got: $price"
+    end
+
+    # Validate confidence
+    confidence = d["confidence"]
+    if !(confidence isa Number)
+        return "confidence must be a number, got: $(typeof(confidence))"
+    end
+    if confidence < 0.0 || confidence > 1.0
+        return "confidence must be in [0.0, 1.0], got: $confidence"
+    end
+
+    # Validate timestamp_ns
+    timestamp = d["timestamp_ns"]
+    if !(timestamp isa Integer)
+        return "timestamp_ns must be an integer, got: $(typeof(timestamp))"
+    end
+    if timestamp <= 0
+        return "timestamp_ns must be positive, got: $timestamp"
+    end
+
+    return nothing
 end
 
 function TradeSignal(d::Dict)
@@ -443,6 +505,14 @@ function start!(
             try
                 msg = ZMQ.recv(socket)
                 data = JSON.parse(String(msg))
+
+                # Validate signal before processing
+                err = validate_signal(data)
+                if err !== nothing
+                    @warn "[execution] Invalid signal: $err"
+                    continue
+                end
+
                 signal = TradeSignal(data)
                 decision = execute_signal!(engine, signal, account_balance)
                 on_decision(decision)
