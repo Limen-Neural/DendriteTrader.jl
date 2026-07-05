@@ -71,10 +71,10 @@ using JSON
 using HTTP
 using ZMQ
 
-export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision
+export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision, SignalEvent
 export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
-export start!, stop!, fill_rate
+export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
 export PositionSize, size_position
@@ -231,6 +231,41 @@ struct ExecutionDecision
     latency_ns::Int64
 end
 
+# ── Structured Logging ────────────────────────────────────────────────────────
+
+"""
+    SignalEvent
+
+Structured event for signal lifecycle tracking.
+"""
+struct SignalEvent
+    event_type::String
+    ticker::String
+    confidence::Float32
+    side::String
+    reason::String
+    kelly_fraction::Float64
+    latency_ns::Int64
+    timestamp::Float64
+end
+
+"""
+    SignalEvent(event_type, ticker, confidence, side; reason="", kelly_fraction=0.0, latency_ns=0)
+
+Convenience constructor for SignalEvent with default values.
+"""
+function SignalEvent(
+    event_type::String,
+    ticker::String,
+    confidence::Float32,
+    side::String;
+    reason::String = "",
+    kelly_fraction::Float64 = 0.0,
+    latency_ns::Int64 = 0,
+)
+    SignalEvent(event_type, ticker, confidence, side, reason, kelly_fraction, latency_ns, time())
+end
+
 # ── Execution Engine ──────────────────────────────────────────────────────────
 
 """
@@ -253,6 +288,7 @@ mutable struct ExecutionEngine
     executed_signals::Int
     rejected_signals::Int
     should_stop::Bool
+    events::Vector{SignalEvent}
 end
 
 function ExecutionEngine(;
@@ -269,6 +305,7 @@ function ExecutionEngine(;
         0,
         0,
         false,
+        SignalEvent[],
     )
 end
 
@@ -282,6 +319,13 @@ Call this from another task or thread to gracefully shut down `start!`.
 function stop!(engine::ExecutionEngine)
     engine.should_stop = true
 end
+
+"""
+    events(engine) -> Vector{SignalEvent}
+
+Return the event log for this engine.
+"""
+events(engine::ExecutionEngine) = engine.events
 
 """
     execute_signal!(engine, signal, account_balance) -> ExecutionDecision
@@ -298,6 +342,16 @@ function execute_signal!(
 
     if !passes_gate(signal, engine.confidence_threshold)
         engine.rejected_signals += 1
+        push!(
+            engine.events,
+            SignalEvent(
+                "gate_reject",
+                signal.ticker,
+                signal.confidence,
+                string(signal.side);
+                reason = "confidence=$(signal.confidence) < threshold=$(engine.confidence_threshold)",
+            ),
+        )
         return ExecutionDecision(
             signal,
             false,
@@ -311,6 +365,10 @@ function execute_signal!(
 
     if signal.side == Neutral
         engine.rejected_signals += 1
+        push!(
+            engine.events,
+            SignalEvent("neutral_reject", signal.ticker, signal.confidence, string(signal.side)),
+        )
         return ExecutionDecision(signal, false, "neutral signal", 0.0, 0.0, 0.0, lat)
     end
 
@@ -324,6 +382,17 @@ function execute_signal!(
 
     if units <= 0.0
         engine.rejected_signals += 1
+        push!(
+            engine.events,
+            SignalEvent(
+                "zero_reject",
+                signal.ticker,
+                signal.confidence,
+                string(signal.side);
+                reason = "zero-sized position",
+                kelly_fraction = position.kelly_fraction,
+            ),
+        )
         return ExecutionDecision(
             signal,
             false,
@@ -346,6 +415,17 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
+    push!(
+        engine.events,
+        SignalEvent(
+            "executed",
+            signal.ticker,
+            signal.confidence,
+            string(signal.side);
+            kelly_fraction = position.kelly_fraction,
+            latency_ns = lat,
+        ),
+    )
     return ExecutionDecision(
         signal,
         true,
