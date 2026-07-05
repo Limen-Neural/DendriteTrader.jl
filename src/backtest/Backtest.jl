@@ -24,7 +24,9 @@ print_summary(result)
 """
 module Backtest
 
-using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent
+using JSON
+
+using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent, events
 
 export BacktestConfig, BacktestResult
 export run_backtest, print_summary
@@ -131,31 +133,65 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     trade_log = TradeRecord[]
     balance = config.initial_balance
 
+    # Simple realized-PnL model for long-only positions.
+    # Track average entry per ticker and realize PnL when SELL reduces a position.
+    open_units = Dict{String, Float64}()
+    avg_entry = Dict{String, Float64}()
+
     for signal in signals
         decision = execute_signal!(engine, signal, balance)
 
-        # Update equity curve
-        push!(equity_curve, balance)
+        realized_pnl = 0.0
 
-        # Record trade if executed
         if decision.executed
+            units = decision.position_units
+
+            if signal.side == Buy
+                prev_units = get(open_units, signal.ticker, 0.0)
+                prev_avg = get(avg_entry, signal.ticker, signal.price)
+                new_units = prev_units + units
+                new_avg = new_units <= 0.0 ? signal.price : (prev_avg * prev_units + signal.price * units) / new_units
+                open_units[signal.ticker] = new_units
+                avg_entry[signal.ticker] = new_avg
+            elseif signal.side == Sell
+                prev_units = get(open_units, signal.ticker, 0.0)
+                sold = min(units, prev_units)
+                if sold > 0.0
+                    entry = get(avg_entry, signal.ticker, signal.price)
+                    realized_pnl = (signal.price - entry) * sold
+                    balance += realized_pnl
+                    remaining = prev_units - sold
+                    if remaining <= 0.0
+                        delete!(open_units, signal.ticker)
+                        delete!(avg_entry, signal.ticker)
+                    else
+                        open_units[signal.ticker] = remaining
+                        # keep avg_entry unchanged for remaining units
+                    end
+                end
+            end
+
             trade = TradeRecord(
                 signal.ticker,
                 string(signal.side),
                 signal.timestamp_ns,
                 signal.price,
-                decision.position_units,
+                units,
                 decision.kelly_fraction,
-                0.0,  # PnL computed at end
+                realized_pnl,
             )
             push!(trade_log, trade)
         end
+
+        # Update equity curve (after any realized PnL)
+        push!(equity_curve, balance)
     end
 
     final_balance = balance
     total_return = (final_balance - config.initial_balance) / config.initial_balance * 100.0
     max_dd = compute_max_drawdown(equity_curve)
-    wr = isempty(trade_log) ? 0.0 : count(t -> t.pnl > 0.0, trade_log) / length(trade_log)
+    closed_trades = filter(t -> t.side == "SELL" && t.pnl != 0.0, trade_log)
+    wr = isempty(closed_trades) ? 0.0 : count(t -> t.pnl > 0.0, closed_trades) / length(closed_trades)
 
     return BacktestResult(
         config,
