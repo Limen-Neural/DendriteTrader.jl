@@ -75,6 +75,7 @@ export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDec
 export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
 export RateLimiter, acquire!, set_rate!
+export PriceCache, invalidate!, clear!, cache_size
 export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
@@ -539,6 +540,112 @@ function set_rate!(limiter::RateLimiter, requests_per_second::Float64)
     limiter.max_tokens = requests_per_second
 end
 
+# ── Price Cache ───────────────────────────────────────────────────────────────
+
+"""
+    PriceCache
+
+Short TTL cache for dYdX price data.
+
+# Fields
+- `prices`:   cached DydxPrice per ticker
+- `times`:    timestamp of last fetch per ticker
+- `ttl_s`:    time-to-live in seconds
+- `lock`:     thread-safe lock
+"""
+mutable struct PriceCache
+    prices::Dict{String, DydxPrice}
+    times::Dict{String, Float64}
+    ttl_s::Float64
+    lock::ReentrantLock
+end
+
+"""
+    PriceCache(; ttl_s=5.0)
+
+Create a price cache with the given TTL in seconds.
+"""
+function PriceCache(; ttl_s::Float64 = 5.0)
+    PriceCache(Dict{String, DydxPrice}(), Dict{String, Float64}(), ttl_s, ReentrantLock())
+end
+
+"""
+    invalidate!(cache, ticker)
+
+Remove a specific ticker from the cache.
+"""
+function invalidate!(cache::PriceCache, ticker::String)
+    lock(cache.lock) do
+        delete!(cache.prices, ticker)
+        delete!(cache.times, ticker)
+    end
+end
+
+"""
+    clear!(cache)
+
+Remove all entries from the cache.
+"""
+function clear!(cache::PriceCache)
+    lock(cache.lock) do
+        empty!(cache.prices)
+        empty!(cache.times)
+    end
+end
+
+"""
+    cache_size(cache)
+
+Return the number of entries in the cache.
+"""
+function cache_size(cache::PriceCache)
+    lock(cache.lock) do
+        return length(cache.prices)
+    end
+end
+
+"""
+    is_fresh(cache, ticker)
+
+Check if a cached entry is still within TTL.
+"""
+function is_fresh(cache::PriceCache, ticker::String)
+    lock(cache.lock) do
+        if !haskey(cache.times, ticker)
+            return false
+        end
+        return (time() - cache.times[ticker]) < cache.ttl_s
+    end
+end
+
+"""
+    get_cached(cache, ticker)
+
+Get a cached price if fresh, nothing otherwise.
+"""
+function get_cached(cache::PriceCache, ticker::String)
+    lock(cache.lock) do
+        if haskey(cache.prices, ticker) && haskey(cache.times, ticker)
+            if (time() - cache.times[ticker]) < cache.ttl_s
+                return cache.prices[ticker]
+            end
+        end
+        return nothing
+    end
+end
+
+"""
+    put_cached!(cache, ticker, price)
+
+Store a price in the cache with current timestamp.
+"""
+function put_cached!(cache::PriceCache, ticker::String, price::DydxPrice)
+    lock(cache.lock) do
+        cache.prices[ticker] = price
+        cache.times[ticker] = time()
+    end
+end
+
 # ── dYdX v4 REST Client ───────────────────────────────────────────────────────
 
 """
@@ -550,28 +657,39 @@ struct DydxClient
     base_url::String
     timeout_s::Float64
     rate_limiter::Union{RateLimiter, Nothing}
+    cache::Union{PriceCache, Nothing}
 end
 
 """
-    DydxClient(; base_url, timeout_s, rate_limit)
+    DydxClient(; base_url, timeout_s, rate_limit, cache)
 
 Create a dYdX client. Pass `rate_limit=RateLimiter()` to enable rate limiting.
+Pass `cache=PriceCache()` to enable price caching.
 """
 function DydxClient(;
     base_url::String = "https://indexer.dydx.trade/v4",
     timeout_s::Float64 = 5.0,
     rate_limit::Union{RateLimiter, Nothing} = nothing,
+    cache::Union{PriceCache, Nothing} = nothing,
 )
-    DydxClient(base_url, timeout_s, rate_limit)
+    DydxClient(base_url, timeout_s, rate_limit, cache)
 end
 
 """
     get_price(client, ticker) -> Union{DydxPrice, Nothing}
 
 Fetch current oracle price and order book top for `ticker`.
-Returns `nothing` on network error.
+Returns `nothing` on network error. Uses cache if configured.
 """
 function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing}
+    # Check cache first
+    if client.cache !== nothing
+        cached = get_cached(client.cache, ticker)
+        if cached !== nothing
+            return cached
+        end
+    end
+
     try
         # Rate limit if configured
         if client.rate_limiter !== nothing
@@ -604,7 +722,14 @@ function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing
             (best_bid + best_ask) / 2.0
         end
 
-        return DydxPrice(ticker, oracle, best_bid, best_ask)
+        price = DydxPrice(ticker, oracle, best_bid, best_ask)
+
+        # Store in cache
+        if client.cache !== nothing
+            put_cached!(client.cache, ticker, price)
+        end
+
+        return price
     catch e
         @warn "dYdX price fetch failed for $ticker: $e"
         return nothing
