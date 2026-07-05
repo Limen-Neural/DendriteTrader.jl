@@ -155,8 +155,11 @@ function validate_signal(d::Dict)
 
     # Validate price
     price = d["price"]
-    if !(price isa Number)
+    if price isa Bool || !(price isa Real)
         return "price must be a number, got: $(typeof(price))"
+    end
+    if !isfinite(Float64(price))
+        return "price must be finite, got: $price"
     end
     if price <= 0
         return "price must be positive, got: $price"
@@ -164,8 +167,11 @@ function validate_signal(d::Dict)
 
     # Validate confidence
     confidence = d["confidence"]
-    if !(confidence isa Number)
+    if confidence isa Bool || !(confidence isa Real)
         return "confidence must be a number, got: $(typeof(confidence))"
+    end
+    if !isfinite(Float64(confidence))
+        return "confidence must be finite, got: $confidence"
     end
     if confidence < 0.0 || confidence > 1.0
         return "confidence must be in [0.0, 1.0], got: $confidence"
@@ -173,11 +179,11 @@ function validate_signal(d::Dict)
 
     # Validate timestamp_ns
     timestamp = d["timestamp_ns"]
-    if !(timestamp isa Integer)
+    if timestamp isa Bool || !(timestamp isa Integer)
         return "timestamp_ns must be an integer, got: $(typeof(timestamp))"
     end
-    if timestamp <= 0
-        return "timestamp_ns must be positive, got: $timestamp"
+    if timestamp < 0
+        return "timestamp_ns must be non-negative, got: $timestamp"
     end
 
     return nothing
@@ -292,7 +298,7 @@ mutable struct ExecutionEngine
     total_signals::Int
     executed_signals::Int
     rejected_signals::Int
-    should_stop::Bool
+    should_stop::Threads.Atomic{Bool}
     events::Vector{SignalEvent}
 end
 
@@ -309,7 +315,7 @@ function ExecutionEngine(;
         0,
         0,
         0,
-        false,
+        Threads.Atomic{Bool}(false),
         SignalEvent[],
     )
 end
@@ -322,7 +328,7 @@ Signal the engine to stop its ZMQ listener loop.
 Call this from another task or thread to gracefully shut down `start!`.
 """
 function stop!(engine::ExecutionEngine)
-    engine.should_stop = true
+    Threads.atomic_store!(engine.should_stop, true)
 end
 
 """
@@ -489,12 +495,14 @@ Token bucket rate limiter for API calls.
 - `max_tokens`:    maximum token capacity
 - `refill_rate`:   tokens added per second
 - `last_refill`:   timestamp of last refill
+- `lock`:          thread-safe lock
 """
 mutable struct RateLimiter
     tokens::Float64
     max_tokens::Float64
     refill_rate::Float64
     last_refill::Float64
+    lock::ReentrantLock
 end
 
 """
@@ -503,27 +511,30 @@ end
 Create a rate limiter with the given requests per second and burst capacity.
 """
 function RateLimiter(; requests_per_second::Float64 = 10.0, burst::Float64 = 10.0)
-    RateLimiter(burst, burst, requests_per_second, time())
+    RateLimiter(burst, burst, requests_per_second, time(), ReentrantLock())
 end
 
 """
     acquire!(limiter)
 
 Block until a token is available. Refills tokens based on elapsed time.
+Thread-safe via ReentrantLock.
 """
 function acquire!(limiter::RateLimiter)
-    now = time()
-    elapsed = now - limiter.last_refill
-    limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
-    limiter.last_refill = now
+    lock(limiter.lock) do
+        now = time()
+        elapsed = now - limiter.last_refill
+        limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
+        limiter.last_refill = now
 
-    if limiter.tokens < 1.0
-        wait_time = (1.0 - limiter.tokens) / limiter.refill_rate
-        sleep(wait_time)
-        limiter.tokens = 0.0
-        limiter.last_refill = time()
-    else
-        limiter.tokens -= 1.0
+        if limiter.tokens < 1.0
+            wait_time = (1.0 - limiter.tokens) / limiter.refill_rate
+            sleep(wait_time)
+            limiter.tokens = 0.0
+            limiter.last_refill = time()
+        else
+            limiter.tokens -= 1.0
+        end
     end
 end
 
@@ -533,14 +544,16 @@ end
 Update the rate limit at runtime.
 """
 function set_rate!(limiter::RateLimiter, requests_per_second::Float64)
-    # Refill tokens based on current state before changing rate
-    now = time()
-    elapsed = now - limiter.last_refill
-    limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
-    limiter.last_refill = now
+    lock(limiter.lock) do
+        # Refill tokens based on current state before changing rate
+        now = time()
+        elapsed = now - limiter.last_refill
+        limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
+        limiter.last_refill = now
 
-    limiter.refill_rate = requests_per_second
-    limiter.max_tokens = requests_per_second
+        limiter.refill_rate = requests_per_second
+        limiter.max_tokens = requests_per_second
+    end
 end
 
 # ── Price Cache ───────────────────────────────────────────────────────────────
@@ -766,9 +779,11 @@ The loop checks `engine.should_stop` periodically.
 engine = ExecutionEngine(confidence_threshold=Float32(0.85))
 
 # Run in background task
-t = @async start!(engine, zmq_endpoint="tcp://localhost:5555") do decision
-    println("Decision: \$(decision.executed)")
-end
+t = @async start!(
+    engine,
+    zmq_endpoint="tcp://localhost:5555",
+    on_decision = decision -> println("Decision: \$(decision.executed)"),
+)
 
 # Stop after 60 seconds
 sleep(60)
@@ -794,7 +809,7 @@ function start!(
 
     start_time = time()
     try
-        while !engine.should_stop
+        while !Threads.atomic_load(engine.should_stop)
             if timeout_s !== nothing && (time() - start_time) >= timeout_s
                 @info "[execution] Timeout reached, stopping listener"
                 break

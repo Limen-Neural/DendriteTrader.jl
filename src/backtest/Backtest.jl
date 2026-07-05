@@ -25,7 +25,8 @@ print_summary(result)
 module Backtest
 
 using JSON
-using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent
+using Printf
+using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent, events
 
 export BacktestConfig, BacktestResult
 export run_backtest, print_summary
@@ -128,26 +129,48 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     equity_curve = Float64[config.initial_balance]
     trade_log = TradeRecord[]
     balance = config.initial_balance
+    positions = Dict{String, Float64}()  # ticker -> entry_price
 
     for signal in signals
+        prev_balance = balance
         decision = execute_signal!(engine, signal, balance)
 
         # Record trade if executed
         if decision.executed
-            # Update balance: subtract cost of position
-            cost = decision.position_units * signal.price
-            balance -= cost
+            if signal.side == Buy
+                # Opening a long position
+                positions[signal.ticker] = signal.price
+            elseif signal.side == Sell && haskey(positions, signal.ticker)
+                # Closing a position — compute PnL
+                entry_price = pop!(positions, signal.ticker)
+                pnl = (signal.price - entry_price) * decision.position_units
+                balance += pnl
 
-            trade = TradeRecord(
-                signal.ticker,
-                string(signal.side),
-                signal.timestamp_ns,
-                signal.price,
-                decision.position_units,
-                decision.kelly_fraction,
-                0.0,  # PnL computed at end
-            )
-            push!(trade_log, trade)
+                trade = TradeRecord(
+                    signal.ticker,
+                    string(signal.side),
+                    signal.timestamp_ns,
+                    signal.price,
+                    decision.position_units,
+                    decision.kelly_fraction,
+                    pnl,
+                )
+                push!(trade_log, trade)
+            else
+                # Opening a new position (sell short or buy)
+                positions[signal.ticker] = signal.price
+
+                trade = TradeRecord(
+                    signal.ticker,
+                    string(signal.side),
+                    signal.timestamp_ns,
+                    signal.price,
+                    decision.position_units,
+                    decision.kelly_fraction,
+                    0.0,  # PnL computed on close
+                )
+                push!(trade_log, trade)
+            end
         end
 
         # Update equity curve after processing
@@ -157,7 +180,8 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     final_balance = balance
     total_return = (final_balance - config.initial_balance) / config.initial_balance * 100.0
     max_dd = compute_max_drawdown(equity_curve)
-    wr = isempty(trade_log) ? 0.0 : count(t -> t.pnl > 0.0, trade_log) / length(trade_log)
+    closed_trades = filter(t -> t.pnl != 0.0, trade_log)
+    wr = isempty(trade_log) ? 0.0 : length(closed_trades) / length(trade_log)
 
     return BacktestResult(
         config,
@@ -225,23 +249,18 @@ end
 Format a number as currency with commas.
 """
 function format_currency(val::Float64)
-    s = string(round(val, digits=2))
-    parts = split(s, ".")
-    int_part = parts[1]
-    dec_part = length(parts) > 1 ? "." * parts[2] : ".00"
-
-    # Add commas
-    digits = collect(int_part)
-    n = length(digits)
+    sign = val < 0 ? "-" : ""
+    s = @sprintf("%.2f", abs(val))
+    int_part, dec_part = split(s, ".")
+    n = length(int_part)
     result = Char[]
-    for (i, d) in enumerate(digits)
-        if i > 1 && (n - i) % 3 == 0
+    for (i, d) in enumerate(int_part)
+        if i > 1 && (n - i + 1) % 3 == 0
             push!(result, ',')
         end
         push!(result, d)
     end
-
-    return String(result) * dec_part
+    return sign * String(result) * "." * dec_part
 end
 
 """
@@ -331,7 +350,9 @@ function export_trade_log_json(result::BacktestResult, path::String)
         for t in result.trade_log
     ]
 
-    JSON.printfile(trades, path)
+    open(path, "w") do io
+        JSON.print(io, trades, 2)
+    end
     @info "Trade log exported to $path"
 end
 
