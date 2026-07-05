@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "86446f48a716a21760d4f9c261bc81a164471dfa"
+project_hash = "96d1a826dc85aaa00123d8d77e68c80c3ee4dd34"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -49,7 +49,7 @@ uuid = "ade2ca70-3891-5945-98fb-dc099432e06a"
 version = "1.11.0"
 
 [[deps.DendriteTrader]]
-deps = ["HTTP", "JSON", "ZMQ"]
+deps = ["HTTP", "JSON", "Printf", "ZMQ"]
 path = "."
 uuid = "b2c3d4e5-f6a7-8901-bcde-f01234567892"
 version = "0.1.0"

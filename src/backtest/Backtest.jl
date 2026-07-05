@@ -235,7 +235,9 @@ function print_summary(result::BacktestResult)
     println("═══════════════════════════════════════════")
     println("  Initial Balance:    \$$(format_currency(result.initial_balance))")
     println("  Final Balance:      \$$(format_currency(result.final_balance))")
-    println("  Total Return:       $(result.total_return >= 0 ? "+" : "")$(round(result.total_return, digits=2))%")
+    println(
+        "  Total Return:       $(result.total_return >= 0 ? "+" : "")$(round(result.total_return, digits=2))%",
+    )
     println("  Max Drawdown:       -$(round(result.max_drawdown, digits=2))%")
     println("  Win Rate:           $(round(result.win_rate * 100, digits=1))%")
     println("  Total Trades:       $(result.total_trades)")
@@ -346,8 +348,7 @@ function export_trade_log_json(result::BacktestResult, path::String)
             "units" => t.units,
             "kelly_fraction" => t.kelly_fraction,
             "pnl" => t.pnl,
-        )
-        for t in result.trade_log
+        ) for t in result.trade_log
     ]
 
     open(path, "w") do io

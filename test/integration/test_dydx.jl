@@ -14,10 +14,7 @@ using DendriteTrader
 
     @info "Running dYdX v4 integration tests against testnet"
 
-    client = DydxClient(
-        base_url = "https://indexer.v4testnet.dydx.exchange/v4",
-        timeout_s = 10.0,
-    )
+    client = DydxClient(base_url = "https://indexer.v4testnet.dydx.exchange/v4", timeout_s = 10.0)
 
     @testset "DydxClient construction" begin
         @test client.base_url == "https://indexer.v4testnet.dydx.exchange/v4"
