@@ -71,15 +71,20 @@ using JSON
 using HTTP
 using ZMQ
 
-export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision
-export execute_signal!, latency_ns, passes_gate
+export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDecision, SignalEvent
+export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
-export start!, fill_rate
+export RateLimiter, acquire!, set_rate!
+export PriceCache, invalidate!, clear!, cache_size
+export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
 export PositionSize, size_position
+export BacktestConfig, BacktestResult, run_backtest, print_summary
+export load_signals_json, load_signals_csv, export_equity_csv, export_trade_log_json
 
-include("sizing/kelly.jl")
+include("sizing/SizingModule.jl")
+using .SizingModule
 
 # ── Trade Signal ─────────────────────────────────────────────────────────────
 
@@ -89,8 +94,8 @@ include("sizing/kelly.jl")
 Direction of a trade signal.
 """
 @enum TradeSide begin
-    Buy     = 1
-    Sell    = 2
+    Buy = 1
+    Sell = 2
     Neutral = 0
 end
 
@@ -114,6 +119,74 @@ struct TradeSignal
     quantity::Float64
     confidence::Float32
     timestamp_ns::Int64
+end
+
+"""
+    validate_signal(d::Dict) -> Union{Nothing, String}
+
+Validate a trade signal dictionary. Returns `nothing` if valid, or an error message string.
+
+# Required Fields
+- `ticker`: String, non-empty
+- `side`: "BUY", "SELL", or "NEUTRAL"
+- `price`: Number > 0
+- `confidence`: Number in [0.0, 1.0]
+- `timestamp_ns`: Integer > 0
+"""
+function validate_signal(d::Dict)
+    # Check required fields
+    for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
+        if !haskey(d, field)
+            return "missing required field: $field"
+        end
+    end
+
+    # Validate ticker
+    ticker = d["ticker"]
+    if !(ticker isa AbstractString) || isempty(ticker)
+        return "ticker must be a non-empty string"
+    end
+
+    # Validate side
+    side = d["side"]
+    if !(side isa AbstractString) || !(side in ("BUY", "SELL", "NEUTRAL"))
+        return "side must be BUY, SELL, or NEUTRAL, got: $side"
+    end
+
+    # Validate price
+    price = d["price"]
+    if price isa Bool || !(price isa Real)
+        return "price must be a number, got: $(typeof(price))"
+    end
+    if !isfinite(Float64(price))
+        return "price must be finite, got: $price"
+    end
+    if price <= 0
+        return "price must be positive, got: $price"
+    end
+
+    # Validate confidence
+    confidence = d["confidence"]
+    if confidence isa Bool || !(confidence isa Real)
+        return "confidence must be a number, got: $(typeof(confidence))"
+    end
+    if !isfinite(Float64(confidence))
+        return "confidence must be finite, got: $confidence"
+    end
+    if confidence < 0.0 || confidence > 1.0
+        return "confidence must be in [0.0, 1.0], got: $confidence"
+    end
+
+    # Validate timestamp_ns
+    timestamp = d["timestamp_ns"]
+    if timestamp isa Bool || !(timestamp isa Integer)
+        return "timestamp_ns must be an integer, got: $(typeof(timestamp))"
+    end
+    if timestamp < 0
+        return "timestamp_ns must be non-negative, got: $timestamp"
+    end
+
+    return nothing
 end
 
 function TradeSignal(d::Dict)
@@ -169,6 +242,41 @@ struct ExecutionDecision
     latency_ns::Int64
 end
 
+# ── Structured Logging ────────────────────────────────────────────────────────
+
+"""
+    SignalEvent
+
+Structured event for signal lifecycle tracking.
+"""
+struct SignalEvent
+    event_type::String
+    ticker::String
+    confidence::Float32
+    side::String
+    reason::String
+    kelly_fraction::Float64
+    latency_ns::Int64
+    timestamp::Float64
+end
+
+"""
+    SignalEvent(event_type, ticker, confidence, side; reason="", kelly_fraction=0.0, latency_ns=0)
+
+Convenience constructor for SignalEvent with default values.
+"""
+function SignalEvent(
+    event_type::String,
+    ticker::String,
+    confidence::Float32,
+    side::String;
+    reason::String = "",
+    kelly_fraction::Float64 = 0.0,
+    latency_ns::Int64 = 0,
+)
+    SignalEvent(event_type, ticker, confidence, side, reason, kelly_fraction, latency_ns, time())
+end
+
 # ── Execution Engine ──────────────────────────────────────────────────────────
 
 """
@@ -190,6 +298,8 @@ mutable struct ExecutionEngine
     total_signals::Int
     executed_signals::Int
     rejected_signals::Int
+    should_stop::Threads.Atomic{Bool}
+    events::Vector{SignalEvent}
 end
 
 function ExecutionEngine(;
@@ -197,9 +307,36 @@ function ExecutionEngine(;
     max_position_size::Float64 = 10.0,
     payoff_ratio::Float64 = 1.5,
 )
-    ExecutionEngine(confidence_threshold, max_position_size, payoff_ratio,
-                    Dict{String,Float64}(), 0, 0, 0)
+    ExecutionEngine(
+        confidence_threshold,
+        max_position_size,
+        payoff_ratio,
+        Dict{String, Float64}(),
+        0,
+        0,
+        0,
+        Threads.Atomic{Bool}(false),
+        SignalEvent[],
+    )
 end
+
+"""
+    stop!(engine)
+
+Signal the engine to stop its ZMQ listener loop.
+
+Call this from another task or thread to gracefully shut down `start!`.
+"""
+function stop!(engine::ExecutionEngine)
+    Threads.atomic_store!(engine.should_stop, true)
+end
+
+"""
+    events(engine) -> Vector{SignalEvent}
+
+Return the event log for this engine.
+"""
+events(engine::ExecutionEngine) = engine.events
 
 """
     execute_signal!(engine, signal, account_balance) -> ExecutionDecision
@@ -216,13 +353,33 @@ function execute_signal!(
 
     if !passes_gate(signal, engine.confidence_threshold)
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false,
+        push!(
+            engine.events,
+            SignalEvent(
+                "gate_reject",
+                signal.ticker,
+                signal.confidence,
+                string(signal.side);
+                reason = "confidence=$(signal.confidence) < threshold=$(engine.confidence_threshold)",
+            ),
+        )
+        return ExecutionDecision(
+            signal,
+            false,
             "confidence=$(signal.confidence) < threshold=$(engine.confidence_threshold)",
-            0.0, 0.0, 0.0, lat)
+            0.0,
+            0.0,
+            0.0,
+            lat,
+        )
     end
 
     if signal.side == Neutral
         engine.rejected_signals += 1
+        push!(
+            engine.events,
+            SignalEvent("neutral_reject", signal.ticker, signal.confidence, string(signal.side)),
+        )
         return ExecutionDecision(signal, false, "neutral signal", 0.0, 0.0, 0.0, lat)
     end
 
@@ -236,7 +393,26 @@ function execute_signal!(
 
     if units <= 0.0
         engine.rejected_signals += 1
-        return ExecutionDecision(signal, false, "zero-sized position", position.kelly_fraction, 0.0, 0.0, lat)
+        push!(
+            engine.events,
+            SignalEvent(
+                "zero_reject",
+                signal.ticker,
+                signal.confidence,
+                string(signal.side);
+                reason = "zero-sized position",
+                kelly_fraction = position.kelly_fraction,
+            ),
+        )
+        return ExecutionDecision(
+            signal,
+            false,
+            "zero-sized position",
+            position.kelly_fraction,
+            0.0,
+            0.0,
+            lat,
+        )
     end
 
     applied_fraction = account_balance <= 0.0 ? 0.0 : (units * signal.price) / account_balance
@@ -250,7 +426,26 @@ function execute_signal!(
     end
 
     engine.executed_signals += 1
-    return ExecutionDecision(signal, true, "executed", position.kelly_fraction, applied_fraction, units, lat)
+    push!(
+        engine.events,
+        SignalEvent(
+            "executed",
+            signal.ticker,
+            signal.confidence,
+            string(signal.side);
+            kelly_fraction = position.kelly_fraction,
+            latency_ns = lat,
+        ),
+    )
+    return ExecutionDecision(
+        signal,
+        true,
+        "executed",
+        position.kelly_fraction,
+        applied_fraction,
+        units,
+        lat,
+    )
 end
 
 """
@@ -258,8 +453,7 @@ end
 
 Fraction of signals that were executed (not rejected).
 """
-fill_rate(e::ExecutionEngine) =
-    e.total_signals == 0 ? 0.0 : e.executed_signals / e.total_signals
+fill_rate(e::ExecutionEngine) = e.total_signals == 0 ? 0.0 : e.executed_signals / e.total_signals
 
 # ── dYdX v4 REST Client ───────────────────────────────────────────────────────
 
@@ -289,6 +483,205 @@ Bid-ask spread in basis points.
 """
 spread_bps(p::DydxPrice) = max(p.best_ask - p.best_bid, 0.0) / max(p.best_ask, 1e-9) * 10_000.0
 
+# ── Rate Limiter ──────────────────────────────────────────────────────────────
+
+"""
+    RateLimiter
+
+Token bucket rate limiter for API calls.
+
+# Fields
+- `tokens`:        current available tokens
+- `max_tokens`:    maximum token capacity
+- `refill_rate`:   tokens added per second
+- `last_refill`:   timestamp of last refill
+- `lock`:          thread-safe lock
+"""
+mutable struct RateLimiter
+    tokens::Float64
+    max_tokens::Float64
+    refill_rate::Float64
+    last_refill::Float64
+    lock::ReentrantLock
+end
+
+"""
+    RateLimiter(; requests_per_second=10.0, burst=10.0)
+
+Create a rate limiter with the given requests per second and burst capacity.
+"""
+function RateLimiter(; requests_per_second::Float64 = 10.0, burst::Float64 = 10.0)
+    if requests_per_second <= 0
+        throw(ArgumentError("requests_per_second must be > 0, got: $requests_per_second"))
+    end
+    if burst <= 0
+        throw(ArgumentError("burst must be > 0, got: $burst"))
+    end
+    RateLimiter(burst, burst, requests_per_second, time(), ReentrantLock())
+end
+
+"""
+    acquire!(limiter)
+
+Block until a token is available. Refills tokens based on elapsed time.
+Thread-safe via ReentrantLock.
+"""
+function acquire!(limiter::RateLimiter)
+    lock(limiter.lock) do
+        if limiter.refill_rate <= 0
+            throw(ArgumentError("refill_rate must be > 0, got: $(limiter.refill_rate)"))
+        end
+
+        now = time()
+        elapsed = now - limiter.last_refill
+        limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
+        limiter.last_refill = now
+
+        if limiter.tokens < 1.0
+            wait_time = (1.0 - limiter.tokens) / limiter.refill_rate
+            sleep(wait_time)
+
+            # Refill again after sleep (preserve any fractional credit)
+            now2 = time()
+            elapsed2 = now2 - limiter.last_refill
+            limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed2 * limiter.refill_rate)
+            limiter.last_refill = now2
+        end
+
+        limiter.tokens = max(0.0, limiter.tokens - 1.0)
+    end
+end
+
+"""
+    set_rate!(limiter, requests_per_second)
+
+Update the rate limit at runtime.
+"""
+function set_rate!(limiter::RateLimiter, requests_per_second::Float64)
+    if requests_per_second <= 0
+        throw(ArgumentError("requests_per_second must be > 0, got: $requests_per_second"))
+    end
+
+    lock(limiter.lock) do
+        # Refill tokens based on current state before changing rate
+        now = time()
+        elapsed = now - limiter.last_refill
+        limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed * limiter.refill_rate)
+        limiter.last_refill = now
+
+        # Preserve burst capacity (max_tokens) and only change refill behavior.
+        limiter.refill_rate = requests_per_second
+    end
+end
+
+# ── Price Cache ───────────────────────────────────────────────────────────────
+
+"""
+    PriceCache
+
+Short TTL cache for dYdX price data.
+
+# Fields
+- `prices`:   cached DydxPrice per ticker
+- `times`:    timestamp of last fetch per ticker
+- `ttl_s`:    time-to-live in seconds
+- `lock`:     thread-safe lock
+"""
+mutable struct PriceCache
+    prices::Dict{String, DydxPrice}
+    times::Dict{String, Float64}
+    ttl_s::Float64
+    lock::ReentrantLock
+end
+
+"""
+    PriceCache(; ttl_s=5.0)
+
+Create a price cache with the given TTL in seconds.
+"""
+function PriceCache(; ttl_s::Float64 = 5.0)
+    PriceCache(Dict{String, DydxPrice}(), Dict{String, Float64}(), ttl_s, ReentrantLock())
+end
+
+"""
+    invalidate!(cache, ticker)
+
+Remove a specific ticker from the cache.
+"""
+function invalidate!(cache::PriceCache, ticker::String)
+    lock(cache.lock) do
+        delete!(cache.prices, ticker)
+        delete!(cache.times, ticker)
+    end
+end
+
+"""
+    clear!(cache)
+
+Remove all entries from the cache.
+"""
+function clear!(cache::PriceCache)
+    lock(cache.lock) do
+        empty!(cache.prices)
+        empty!(cache.times)
+    end
+end
+
+"""
+    cache_size(cache)
+
+Return the number of entries in the cache.
+"""
+function cache_size(cache::PriceCache)
+    lock(cache.lock) do
+        return length(cache.prices)
+    end
+end
+
+"""
+    is_fresh(cache, ticker)
+
+Check if a cached entry is still within TTL.
+"""
+function is_fresh(cache::PriceCache, ticker::String)
+    lock(cache.lock) do
+        if !haskey(cache.times, ticker)
+            return false
+        end
+        return (time() - cache.times[ticker]) < cache.ttl_s
+    end
+end
+
+"""
+    get_cached(cache, ticker)
+
+Get a cached price if fresh, nothing otherwise.
+"""
+function get_cached(cache::PriceCache, ticker::String)
+    lock(cache.lock) do
+        if haskey(cache.prices, ticker) && haskey(cache.times, ticker)
+            if (time() - cache.times[ticker]) < cache.ttl_s
+                return cache.prices[ticker]
+            end
+        end
+        return nothing
+    end
+end
+
+"""
+    put_cached!(cache, ticker, price)
+
+Store a price in the cache with current timestamp.
+"""
+function put_cached!(cache::PriceCache, ticker::String, price::DydxPrice)
+    lock(cache.lock) do
+        cache.prices[ticker] = price
+        cache.times[ticker] = time()
+    end
+end
+
+# ── dYdX v4 REST Client ───────────────────────────────────────────────────────
+
 """
     DydxClient
 
@@ -297,21 +690,48 @@ REST client for dYdX v4 perpetuals (no API key required for read-only market dat
 struct DydxClient
     base_url::String
     timeout_s::Float64
+    rate_limiter::Union{RateLimiter, Nothing}
+    cache::Union{PriceCache, Nothing}
 end
 
-DydxClient(; base_url::String = "https://indexer.dydx.trade/v4",
-             timeout_s::Float64 = 5.0) = DydxClient(base_url, timeout_s)
+"""
+    DydxClient(; base_url, timeout_s, rate_limit, cache)
+
+Create a dYdX client. Pass `rate_limit=RateLimiter()` to enable rate limiting.
+Pass `cache=PriceCache()` to enable price caching.
+"""
+function DydxClient(;
+    base_url::String = "https://indexer.dydx.trade/v4",
+    timeout_s::Float64 = 5.0,
+    rate_limit::Union{RateLimiter, Nothing} = nothing,
+    cache::Union{PriceCache, Nothing} = nothing,
+)
+    DydxClient(base_url, timeout_s, rate_limit, cache)
+end
 
 """
     get_price(client, ticker) -> Union{DydxPrice, Nothing}
 
 Fetch current oracle price and order book top for `ticker`.
-Returns `nothing` on network error.
+Returns `nothing` on network error. Uses cache if configured.
 """
 function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing}
+    # Check cache first
+    if client.cache !== nothing
+        cached = get_cached(client.cache, ticker)
+        if cached !== nothing
+            return cached
+        end
+    end
+
     try
+        # Rate limit if configured
+        if client.rate_limiter !== nothing
+            acquire!(client.rate_limiter)
+        end
+
         url = "$(client.base_url)/orderbooks/perpetualMarket/$(ticker)"
-        resp = HTTP.get(url; readtimeout=client.timeout_s)
+        resp = HTTP.get(url; readtimeout = client.timeout_s)
         data = JSON.parse(String(resp.body))
 
         bids = get(data, "bids", [])
@@ -320,9 +740,14 @@ function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing
         best_bid = isempty(bids) ? 0.0 : parse(Float64, first(bids)["price"])
         best_ask = isempty(asks) ? 0.0 : parse(Float64, first(asks)["price"])
 
+        # Rate limit for second call
+        if client.rate_limiter !== nothing
+            acquire!(client.rate_limiter)
+        end
+
         # Oracle price from markets endpoint
         market_url = "$(client.base_url)/perpetualMarkets?ticker=$(ticker)"
-        market_resp = HTTP.get(market_url; readtimeout=client.timeout_s)
+        market_resp = HTTP.get(market_url; readtimeout = client.timeout_s)
         market_data = JSON.parse(String(market_resp.body))
         markets = get(market_data, "markets", Dict())
         oracle = if haskey(markets, ticker)
@@ -331,7 +756,14 @@ function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing
             (best_bid + best_ask) / 2.0
         end
 
-        return DydxPrice(ticker, oracle, best_bid, best_ask)
+        price = DydxPrice(ticker, oracle, best_bid, best_ask)
+
+        # Store in cache
+        if client.cache !== nothing
+            put_cached!(client.cache, ticker, price)
+        end
+
+        return price
     catch e
         @warn "dYdX price fetch failed for $ticker: $e"
         return nothing
@@ -341,7 +773,7 @@ end
 # ── ZMQ Signal Listener ───────────────────────────────────────────────────────
 
 """
-    start!(engine; zmq_endpoint, account_balance, on_decision)
+    start!(engine; zmq_endpoint, account_balance, on_decision, timeout_s)
 
 Start the ZMQ SUB listener loop (requires ZMQ.jl).
 
@@ -353,15 +785,27 @@ through the execution engine, calling `on_decision` for each result.
 - `zmq_endpoint`:    ZMQ endpoint (e.g. "tcp://localhost:5555" or "ipc:///tmp/signals.ipc")
 - `account_balance`: account size for Kelly sizing
 - `on_decision`:     callback `(ExecutionDecision) -> Nothing`
+- `timeout_s`:       total seconds to run before auto-stopping (nothing = run forever)
+
+# Shutdown
+
+Call `stop!(engine)` from another task to gracefully stop the listener.
+The loop checks `engine.should_stop` periodically.
 
 # Example
 ```julia
 engine = ExecutionEngine(confidence_threshold=Float32(0.85))
-start!(engine, zmq_endpoint="tcp://localhost:5555") do decision
-    if decision.executed
-        println("Executed: \$(decision.signal.ticker) x\$(round(decision.position_units, digits=4))")
-    end
-end
+
+# Run in background task
+t = @async start!(
+    engine,
+    zmq_endpoint="tcp://localhost:5555",
+    on_decision = decision -> println("Decision: \$(decision.executed)"),
+)
+
+# Stop after 60 seconds
+sleep(60)
+stop!(engine)
 ```
 """
 function start!(
@@ -369,26 +813,62 @@ function start!(
     zmq_endpoint::String = "tcp://localhost:5555",
     account_balance::Float64 = 10_000.0,
     on_decision = decision -> nothing,
+    timeout_s::Union{Float64, Nothing} = nothing,
 )
+    # Allow engine reuse across stop/start cycles.
+    Threads.atomic_store!(engine.should_stop, false)
+
     ctx = ZMQ.Context()
     socket = ZMQ.Socket(ctx, ZMQ.SUB)
     ZMQ.subscribe(socket, "")
     ZMQ.connect(socket, zmq_endpoint)
 
+    # Set receive timeout to 1 second so we can check should_stop periodically
+    ZMQ.set_rcvtimeo(socket, 1000)
+
     @info "[execution] ZMQ SUB connected to $zmq_endpoint"
 
+    start_time = time()
     try
-        while true
-            msg = ZMQ.recv(socket)
-            data = JSON.parse(String(msg))
-            signal = TradeSignal(data)
-            decision = execute_signal!(engine, signal, account_balance)
-            on_decision(decision)
+        while !Threads.atomic_load(engine.should_stop)
+            if timeout_s !== nothing && (time() - start_time) >= timeout_s
+                @info "[execution] Timeout reached, stopping listener"
+                break
+            end
+
+            try
+                msg = ZMQ.recv(socket)
+                data = JSON.parse(String(msg))
+
+                # Validate signal before processing
+                err = validate_signal(data)
+                if err !== nothing
+                    @warn "[execution] Invalid signal: $err"
+                    continue
+                end
+
+                signal = TradeSignal(data)
+                decision = execute_signal!(engine, signal, account_balance)
+                on_decision(decision)
+            catch e
+                if e isa ZMQ.TimeoutError
+                    # recv timeout, loop back to check should_stop
+                    continue
+                else
+                    rethrow(e)
+                end
+            end
         end
     finally
         ZMQ.close(socket)
         ZMQ.close(ctx)
+        @info "[execution] ZMQ listener stopped"
     end
 end
+
+# ── Backtest Harness ──────────────────────────────────────────────────────────
+
+include("backtest/Backtest.jl")
+using .Backtest
 
 end # module
