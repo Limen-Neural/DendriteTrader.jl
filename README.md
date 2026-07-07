@@ -104,7 +104,7 @@ println(decision)
 
 ```julia
 start!(
-    engine,
+    engine;
     zmq_endpoint = "tcp://localhost:5555",
     on_decision = decision -> begin
         if decision.executed
