@@ -765,6 +765,7 @@ function get_price(client::DydxClient, ticker::String)::Union{DydxPrice, Nothing
 
         return price
     catch e
+        e isa InterruptException && rethrow()
         @warn "dYdX price fetch failed for $ticker: $e"
         return nothing
     end
