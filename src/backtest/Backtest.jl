@@ -181,8 +181,8 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     total_return = (final_balance - config.initial_balance) / config.initial_balance * 100.0
     max_dd = compute_max_drawdown(equity_curve)
     closed_trades = filter(t -> t.pnl != 0.0, trade_log)
-    winning_trades = filter(t -> t.pnl > 0.0, closed_trades)
-    wr = isempty(closed_trades) ? 0.0 : length(winning_trades) / length(closed_trades)
+    num_winning = count(t -> t.pnl > 0.0, closed_trades)
+    wr = isempty(closed_trades) ? 0.0 : num_winning / length(closed_trades)
 
     return BacktestResult(
         config,
