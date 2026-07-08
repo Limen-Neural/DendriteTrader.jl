@@ -43,12 +43,16 @@ Configuration for backtest runs.
 - `confidence_threshold`: minimum signal confidence to execute (default 0.85)
 - `payoff_ratio`: odds-style average win/loss ratio for Kelly sizing (default 1.5)
 - `max_position_size`: hard cap on position units (default 10.0)
+- `slippage_pct`: slippage percentage per trade (default 0.0)
+- `commission_pct`: commission percentage per trade (default 0.0)
 """
 struct BacktestConfig
     initial_balance::Float64
     confidence_threshold::Float32
     payoff_ratio::Float64
     max_position_size::Float64
+    slippage_pct::Float64
+    commission_pct::Float64
 end
 
 function BacktestConfig(;
@@ -56,8 +60,10 @@ function BacktestConfig(;
     confidence_threshold::Float32 = Float32(0.85),
     payoff_ratio::Float64 = 1.5,
     max_position_size::Float64 = 10.0,
+    slippage_pct::Float64 = 0.0,
+    commission_pct::Float64 = 0.0,
 )
-    BacktestConfig(initial_balance, confidence_threshold, payoff_ratio, max_position_size)
+    BacktestConfig(initial_balance, confidence_threshold, payoff_ratio, max_position_size, slippage_pct, commission_pct)
 end
 
 """
