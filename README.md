@@ -103,15 +103,19 @@ println(decision)
 ### 3. Start the ZMQ listener
 
 ```julia
-start!(engine, zmq_endpoint = "tcp://localhost:5555") do decision
-    if decision.executed
-        println("Executed: $(decision.signal.ticker) × $(round(decision.position_units, digits=4))")
-        println("  Latency: $(decision.latency_ns) ns")
-        println("  Kelly fraction: $(round(decision.kelly_fraction, digits=4))")
-    else
-        println("Rejected: $(decision.reason)")
-    end
-end
+start!(
+    engine;
+    zmq_endpoint = "tcp://localhost:5555",
+    on_decision = decision -> begin
+        if decision.executed
+            println("Executed: $(decision.signal.ticker) × $(round(decision.position_units, digits=4))")
+            println("  Latency: $(decision.latency_ns) ns")
+            println("  Kelly fraction: $(round(decision.kelly_fraction, digits=4))")
+        else
+            println("Rejected: $(decision.reason)")
+        end
+    end,
+)
 ```
 
 ### 4. Fetch market data for any supported venue symbol
