@@ -50,67 +50,81 @@ using DendriteTrader
         end
 
         # Empty ticker returns error
-        empty_ticker = copy(valid); empty_ticker["ticker"] = ""
+        empty_ticker = copy(valid);
+        empty_ticker["ticker"] = ""
         @test occursin("ticker", validate_signal(empty_ticker))
 
         # Invalid side returns error
         for bad_side in ("hold", "Buy", "", "BUY SELL")
-            d = copy(valid); d["side"] = bad_side
+            d = copy(valid);
+            d["side"] = bad_side
             r = validate_signal(d)
             @test r isa String
             @test occursin("side", r)
         end
 
         # Negative price returns error
-        neg_price = copy(valid); neg_price["price"] = -1.0
+        neg_price = copy(valid);
+        neg_price["price"] = -1.0
         @test occursin("price", validate_signal(neg_price))
 
         # Zero price returns error
-        zero_price = copy(valid); zero_price["price"] = 0.0
+        zero_price = copy(valid);
+        zero_price["price"] = 0.0
         @test occursin("price", validate_signal(zero_price))
 
         # Confidence out of range returns error
         for bad_conf in (-0.1, 1.1, -1.0, 2.0)
-            d = copy(valid); d["confidence"] = bad_conf
+            d = copy(valid);
+            d["confidence"] = bad_conf
             @test occursin("confidence", validate_signal(d))
         end
 
         # Boundary confidence values are accepted
         for edge_conf in (0.0, 1.0)
-            d = copy(valid); d["confidence"] = edge_conf
+            d = copy(valid);
+            d["confidence"] = edge_conf
             @test validate_signal(d) === nothing
         end
 
         # Bool rejected for price
-        bool_price = copy(valid); bool_price["price"] = true
+        bool_price = copy(valid);
+        bool_price["price"] = true
         @test occursin("number", validate_signal(bool_price))
 
         # Bool rejected for confidence
-        bool_conf = copy(valid); bool_conf["confidence"] = false
+        bool_conf = copy(valid);
+        bool_conf["confidence"] = false
         @test occursin("number", validate_signal(bool_conf))
 
         # Bool rejected for timestamp
-        bool_ts = copy(valid); bool_ts["timestamp_ns"] = true
+        bool_ts = copy(valid);
+        bool_ts["timestamp_ns"] = true
         @test occursin("integer", validate_signal(bool_ts))
 
         # NaN rejected for price
-        nan_price = copy(valid); nan_price["price"] = NaN
+        nan_price = copy(valid);
+        nan_price["price"] = NaN
         @test occursin("finite", validate_signal(nan_price))
 
         # Inf rejected for price
-        inf_price = copy(valid); inf_price["price"] = Inf
+        inf_price = copy(valid);
+        inf_price["price"] = Inf
         @test occursin("finite", validate_signal(inf_price))
 
         # NaN rejected for confidence
-        nan_conf = copy(valid); nan_conf["confidence"] = NaN
+        nan_conf = copy(valid);
+        nan_conf["confidence"] = NaN
         @test occursin("finite", validate_signal(nan_conf))
 
         # Inf rejected for confidence
-        inf_conf = copy(valid); inf_conf["confidence"] = Inf
+        inf_conf = copy(valid);
+        inf_conf["confidence"] = Inf
         @test occursin("finite", validate_signal(inf_conf))
 
         # Negative timestamp returns error
-        neg_ts = copy(valid); neg_ts["timestamp_ns"] = -1
+        neg_ts = copy(valid);
+        neg_ts["timestamp_ns"] = -1
         @test occursin("timestamp", validate_signal(neg_ts))
     end
 
@@ -363,17 +377,6 @@ using DendriteTrader
             @test cache_size(cache) == 2
         end
     end
-    @testset "Sell and Neutral signals" begin
-        @testset "Sell signal on existing position decrements position" begin
-            engine = ExecutionEngine()
-            buy = TradeSignal(
-                Dict(
-                    "ticker"=>"MARKET-E",
-                    "side"=>"BUY",
-                    "price"=>50.0,
-                    "quantity"=>1.0,
-                    "confidence"=>0.92,
-                    "timestamp_ns"=>1_000,
                 ),
             )
             dec_buy = execute_signal!(engine, buy, 10_000.0)
@@ -890,6 +893,96 @@ end
             rl = RateLimiter(requests_per_second = 10.0, burst = 5.0)
             set_rate!(rl, 20.0)
             @test rl.max_tokens == 5.0
+        end
+    end
+
+    @testset "PriceCache" begin
+        @testset "constructor with default TTL" begin
+            cache = PriceCache()
+            @test cache.ttl_s == 5.0
+            @test cache_size(cache) == 0
+        end
+
+        @testset "constructor with custom TTL" begin
+            cache = PriceCache(ttl_s = 10.0)
+            @test cache.ttl_s == 10.0
+        end
+
+        @testset "put_cached! stores entry" begin
+            cache = PriceCache()
+            price = DydxPrice("BTC-USD", 50000.0, 49999.0, 50001.0)
+            put_cached!(cache, "BTC-USD", price)
+            @test cache_size(cache) == 1
+        end
+
+        @testset "get_cached returns fresh entry" begin
+            cache = PriceCache()
+            price = DydxPrice("ETH-USD", 3000.0, 2999.0, 3001.0)
+            put_cached!(cache, "ETH-USD", price)
+            result = get_cached(cache, "ETH-USD")
+            @test result !== nothing
+            @test result.ticker == "ETH-USD"
+            @test result.oracle_price ≈ 3000.0
+        end
+
+        @testset "get_cached returns nothing for expired entry" begin
+            cache = PriceCache(ttl_s = 0.01)
+            price = DydxPrice("SOL-USD", 100.0, 99.0, 101.0)
+            put_cached!(cache, "SOL-USD", price)
+            sleep(0.02)
+            @test get_cached(cache, "SOL-USD") === nothing
+        end
+
+        @testset "get_cached returns nothing for missing ticker" begin
+            cache = PriceCache()
+            @test get_cached(cache, "MISSING") === nothing
+        end
+
+        @testset "invalidate! removes specific entry" begin
+            cache = PriceCache()
+            put_cached!(cache, "BTC-USD", DydxPrice("BTC-USD", 50000.0, 49999.0, 50001.0))
+            put_cached!(cache, "ETH-USD", DydxPrice("ETH-USD", 3000.0, 2999.0, 3001.0))
+            @test cache_size(cache) == 2
+            invalidate!(cache, "BTC-USD")
+            @test cache_size(cache) == 1
+            @test get_cached(cache, "BTC-USD") === nothing
+            @test get_cached(cache, "ETH-USD") !== nothing
+        end
+
+        @testset "invalidate! on missing ticker is a no-op" begin
+            cache = PriceCache()
+            invalidate!(cache, "MISSING")
+            @test cache_size(cache) == 0
+        end
+
+        @testset "clear! removes all entries" begin
+            cache = PriceCache()
+            put_cached!(cache, "BTC-USD", DydxPrice("BTC-USD", 50000.0, 49999.0, 50001.0))
+            put_cached!(cache, "ETH-USD", DydxPrice("ETH-USD", 3000.0, 2999.0, 3001.0))
+            put_cached!(cache, "SOL-USD", DydxPrice("SOL-USD", 100.0, 99.0, 101.0))
+            @test cache_size(cache) == 3
+            clear!(cache)
+            @test cache_size(cache) == 0
+            @test get_cached(cache, "BTC-USD") === nothing
+            @test get_cached(cache, "ETH-USD") === nothing
+            @test get_cached(cache, "SOL-USD") === nothing
+        end
+
+        @testset "clear! on empty cache is a no-op" begin
+            cache = PriceCache()
+            clear!(cache)
+            @test cache_size(cache) == 0
+        end
+
+        @testset "cache_size returns correct count" begin
+            cache = PriceCache()
+            @test cache_size(cache) == 0
+            put_cached!(cache, "A", DydxPrice("A", 1.0, 0.9, 1.1))
+            @test cache_size(cache) == 1
+            put_cached!(cache, "B", DydxPrice("B", 2.0, 1.9, 2.1))
+            @test cache_size(cache) == 2
+            put_cached!(cache, "A", DydxPrice("A", 1.5, 1.4, 1.6))
+            @test cache_size(cache) == 2
         end
     end
 end

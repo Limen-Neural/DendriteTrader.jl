@@ -546,7 +546,8 @@ function acquire!(limiter::RateLimiter)
             # Refill again after sleep (preserve any fractional credit)
             now2 = time()
             elapsed2 = now2 - limiter.last_refill
-            limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed2 * limiter.refill_rate)
+            limiter.tokens =
+                min(limiter.max_tokens, limiter.tokens + elapsed2 * limiter.refill_rate)
             limiter.last_refill = now2
         end
 
