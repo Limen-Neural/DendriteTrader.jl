@@ -1,0 +1,43 @@
+name: Integration Tests (dYdX)
+
+on:
+  schedule:
+    - cron: '23 6 * * *'   # daily at 06:23 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DYDX_INTEGRATION: "true"
+
+jobs:
+  dydx:
+    name: dYdX v4 integration — Julia ${{ matrix.julia-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1.10', '1.11', '1.12']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Run dYdX integration tests
+        run: julia --project=. -e 'include("test/integration/test_dydx.jl")'
