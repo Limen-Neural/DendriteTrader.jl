@@ -26,7 +26,7 @@ module Backtest
 
 using JSON
 using Printf
-using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent, events
+using ..DendriteTrader: TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, execute_signal!, SignalEvent, events
 
 export BacktestConfig, BacktestResult
 export run_backtest, print_summary

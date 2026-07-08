@@ -175,6 +175,139 @@ using DendriteTrader
         @test !zero_dec.executed
         @test zero_dec.reason == "zero-sized position"
     end
+
+    @testset "Backtest" begin
+        @testset "BacktestConfig constructor with defaults" begin
+            cfg = BacktestConfig()
+            @test cfg.initial_balance == 10_000.0
+            @test cfg.confidence_threshold == Float32(0.85)
+            @test cfg.payoff_ratio == 1.5
+            @test cfg.max_position_size == 10.0
+        end
+
+        @testset "BacktestConfig constructor with custom values" begin
+            cfg = BacktestConfig(
+                initial_balance = 50_000.0,
+                confidence_threshold = Float32(0.90),
+                payoff_ratio = 2.0,
+                max_position_size = 20.0,
+            )
+            @test cfg.initial_balance == 50_000.0
+            @test cfg.confidence_threshold == Float32(0.90)
+            @test cfg.payoff_ratio == 2.0
+            @test cfg.max_position_size == 20.0
+        end
+
+        @testset "run_backtest with buy signals — equity curve changes" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "ETH-USD",
+                    "side" => "BUY",
+                    "price" => 50.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test length(result.equity_curve) == 3  # initial + 2 signals
+            @test result.equity_curve[1] == 10_000.0
+            # Buy-only: no trades recorded until a sell closes the position
+            @test result.total_trades == 0
+            @test result.final_balance == cfg.initial_balance
+        end
+
+        @testset "run_backtest with buy+sell — PnL computed" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 110.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.final_balance != cfg.initial_balance
+            @test result.total_return != 0.0
+            closed = filter(t -> t.pnl != 0.0, result.trade_log)
+            @test length(closed) >= 1
+            @test closed[1].pnl > 0.0  # bought at 100, sold at 110
+        end
+
+        @testset "run_backtest with neutral signals — no trades" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "NEUTRAL",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.total_trades == 0
+            @test result.final_balance == cfg.initial_balance
+            @test result.equity_curve == [10_000.0, 10_000.0]
+        end
+
+        @testset "print_summary — no errors" begin
+            cfg = BacktestConfig()
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test_nowarn print_summary(result)
+        end
+
+        @testset "format_currency" begin
+            fmt = DendriteTrader.Backtest.format_currency
+            @test fmt(1234.56) == "1,234.56"
+            @test fmt(-5000.10) == "-5,000.10"
+            @test fmt(0.0) == "0.00"
+            @test fmt(1_000_000.00) == "1,000,000.00"
+        end
+
+        @testset "compute_max_drawdown" begin
+            mdd = DendriteTrader.Backtest.compute_max_drawdown
+            # Flat curve → no drawdown
+            @test mdd([100.0, 100.0, 100.0]) == 0.0
+            # Single element → 0
+            @test mdd([100.0]) == 0.0
+            # Dip from 100 to 80 → 20% drawdown
+            @test mdd([100.0, 110.0, 88.0]) ≈ 20.0 atol=0.01
+            # Recover after dip
+            @test mdd([100.0, 120.0, 90.0, 130.0]) ≈ 25.0 atol=0.01
+        end
+    end
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
