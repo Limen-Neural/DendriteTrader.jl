@@ -4,4 +4,5 @@
 .codex/
 .cursor/
 .vscode/
+.beads/
 Manifest.toml
