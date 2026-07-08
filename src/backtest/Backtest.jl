@@ -26,7 +26,7 @@ module Backtest
 
 using JSON
 using Printf
-using ..DendriteTrader: TradeSignal, ExecutionEngine, execute_signal!, SignalEvent, events
+using ..DendriteTrader: TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, execute_signal!, SignalEvent, events
 
 export BacktestConfig, BacktestResult
 export run_backtest, print_summary
@@ -124,6 +124,7 @@ end
     run_backtest(config, signals) -> BacktestResult
 
 Replay signals through the ExecutionEngine and compute performance metrics.
+Applies slippage and commission when configured.
 """
 function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::BacktestResult
     engine = ExecutionEngine(
@@ -143,20 +144,31 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
 
         # Record trade if executed
         if decision.executed
+            # Apply slippage to execution price
+            if signal.side == Buy
+                execution_price = signal.price * (1.0 + config.slippage_pct / 100.0)
+            else
+                execution_price = signal.price * (1.0 - config.slippage_pct / 100.0)
+            end
+
+            # Apply commission
+            commission = decision.position_units * execution_price * (config.commission_pct / 100.0)
+            balance -= commission
+
             if signal.side == Buy
                 # Opening a long position
-                positions[signal.ticker] = signal.price
+                positions[signal.ticker] = execution_price
             elseif signal.side == Sell && haskey(positions, signal.ticker)
                 # Closing a position — compute PnL
                 entry_price = pop!(positions, signal.ticker)
-                pnl = (signal.price - entry_price) * decision.position_units
+                pnl = (execution_price - entry_price) * decision.position_units
                 balance += pnl
 
                 trade = TradeRecord(
                     signal.ticker,
                     string(signal.side),
                     signal.timestamp_ns,
-                    signal.price,
+                    execution_price,
                     decision.position_units,
                     decision.kelly_fraction,
                     pnl,
@@ -164,13 +176,13 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 push!(trade_log, trade)
             else
                 # Opening a new position (sell short or buy)
-                positions[signal.ticker] = signal.price
+                positions[signal.ticker] = execution_price
 
                 trade = TradeRecord(
                     signal.ticker,
                     string(signal.side),
                     signal.timestamp_ns,
-                    signal.price,
+                    execution_price,
                     decision.position_units,
                     decision.kelly_fraction,
                     0.0,  # PnL computed on close
