@@ -175,6 +175,96 @@ using DendriteTrader
         @test !zero_dec.executed
         @test zero_dec.reason == "zero-sized position"
     end
+
+    @testset "PriceCache" begin
+        @testset "constructor with default TTL" begin
+            cache = PriceCache()
+            @test cache.ttl_s == 5.0
+            @test cache_size(cache) == 0
+        end
+
+        @testset "constructor with custom TTL" begin
+            cache = PriceCache(ttl_s = 10.0)
+            @test cache.ttl_s == 10.0
+        end
+
+        @testset "put_cached! stores entry" begin
+            cache = PriceCache()
+            price = DydxPrice("BTC-USD", 50000.0, 49999.0, 50001.0)
+            put_cached!(cache, "BTC-USD", price)
+            @test cache_size(cache) == 1
+        end
+
+        @testset "get_cached returns fresh entry" begin
+            cache = PriceCache()
+            price = DydxPrice("ETH-USD", 3000.0, 2999.0, 3001.0)
+            put_cached!(cache, "ETH-USD", price)
+            result = get_cached(cache, "ETH-USD")
+            @test result !== nothing
+            @test result.ticker == "ETH-USD"
+            @test result.oracle_price ≈ 3000.0
+        end
+
+        @testset "get_cached returns nothing for expired entry" begin
+            cache = PriceCache(ttl_s = 0.01)
+            price = DydxPrice("SOL-USD", 100.0, 99.0, 101.0)
+            put_cached!(cache, "SOL-USD", price)
+            sleep(0.02)
+            @test get_cached(cache, "SOL-USD") === nothing
+        end
+
+        @testset "get_cached returns nothing for missing ticker" begin
+            cache = PriceCache()
+            @test get_cached(cache, "MISSING") === nothing
+        end
+
+        @testset "invalidate! removes specific entry" begin
+            cache = PriceCache()
+            put_cached!(cache, "BTC-USD", DydxPrice("BTC-USD", 50000.0, 49999.0, 50001.0))
+            put_cached!(cache, "ETH-USD", DydxPrice("ETH-USD", 3000.0, 2999.0, 3001.0))
+            @test cache_size(cache) == 2
+            invalidate!(cache, "BTC-USD")
+            @test cache_size(cache) == 1
+            @test get_cached(cache, "BTC-USD") === nothing
+            @test get_cached(cache, "ETH-USD") !== nothing
+        end
+
+        @testset "invalidate! on missing ticker is a no-op" begin
+            cache = PriceCache()
+            invalidate!(cache, "MISSING")
+            @test cache_size(cache) == 0
+        end
+
+        @testset "clear! removes all entries" begin
+            cache = PriceCache()
+            put_cached!(cache, "BTC-USD", DydxPrice("BTC-USD", 50000.0, 49999.0, 50001.0))
+            put_cached!(cache, "ETH-USD", DydxPrice("ETH-USD", 3000.0, 2999.0, 3001.0))
+            put_cached!(cache, "SOL-USD", DydxPrice("SOL-USD", 100.0, 99.0, 101.0))
+            @test cache_size(cache) == 3
+            clear!(cache)
+            @test cache_size(cache) == 0
+            @test get_cached(cache, "BTC-USD") === nothing
+            @test get_cached(cache, "ETH-USD") === nothing
+            @test get_cached(cache, "SOL-USD") === nothing
+        end
+
+        @testset "clear! on empty cache is a no-op" begin
+            cache = PriceCache()
+            clear!(cache)
+            @test cache_size(cache) == 0
+        end
+
+        @testset "cache_size returns correct count" begin
+            cache = PriceCache()
+            @test cache_size(cache) == 0
+            put_cached!(cache, "A", DydxPrice("A", 1.0, 0.9, 1.1))
+            @test cache_size(cache) == 1
+            put_cached!(cache, "B", DydxPrice("B", 2.0, 1.9, 2.1))
+            @test cache_size(cache) == 2
+            put_cached!(cache, "A", DydxPrice("A", 1.5, 1.4, 1.6))
+            @test cache_size(cache) == 2
+        end
+    end
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
