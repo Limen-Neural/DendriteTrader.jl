@@ -855,6 +855,43 @@ end
     wait(t)
     close(pub)
     close(ctx)
+    @testset "RateLimiter" begin
+        @testset "constructor defaults" begin
+            rl = RateLimiter()
+            @test rl.tokens == 10.0
+            @test rl.max_tokens == 10.0
+            @test rl.refill_rate == 10.0
+        end
+
+        @testset "constructor rejects requests_per_second <= 0" begin
+            @test_throws ArgumentError RateLimiter(requests_per_second = 0.0)
+            @test_throws ArgumentError RateLimiter(requests_per_second = -1.0)
+        end
+
+        @testset "constructor rejects burst <= 0" begin
+            @test_throws ArgumentError RateLimiter(burst = 0.0)
+            @test_throws ArgumentError RateLimiter(burst = -5.0)
+        end
+
+        @testset "acquire! with available tokens" begin
+            rl = RateLimiter(requests_per_second = 100.0, burst = 5.0)
+            @test rl.tokens == 5.0
+            acquire!(rl)
+            @test rl.tokens ≈ 4.0 atol = 0.1
+        end
+
+        @testset "set_rate! changes refill rate" begin
+            rl = RateLimiter(requests_per_second = 10.0, burst = 10.0)
+            set_rate!(rl, 20.0)
+            @test rl.refill_rate == 20.0
+        end
+
+        @testset "set_rate! preserves burst capacity" begin
+            rl = RateLimiter(requests_per_second = 10.0, burst = 5.0)
+            set_rate!(rl, 20.0)
+            @test rl.max_tokens == 5.0
+        end
+    end
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
