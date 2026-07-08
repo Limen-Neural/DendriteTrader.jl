@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 using Test
+using JSON
+using ZMQ
 using DendriteTrader
 
 @testset "DendriteTrader" begin
@@ -175,6 +177,72 @@ using DendriteTrader
         @test !zero_dec.executed
         @test zero_dec.reason == "zero-sized position"
     end
+end
+
+
+@testset "ZMQ topic filtering" begin
+    endpoint = "ipc:///tmp/dendrite-test-topic-$(getpid()).ipc"
+    ctx = ZMQ.Context()
+    pub = ZMQ.Socket(ctx, ZMQ.PUB)
+    ZMQ.bind(pub, endpoint)
+    sleep(0.1)
+
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        zmq_topic = "trade.",
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 3.0,
+    )
+    sleep(0.5)
+
+    signal_json = JSON.json(Dict(
+        "ticker" => "BTC-USD",
+        "side" => "BUY",
+        "price" => 50_000.0,
+        "quantity" => 0.1,
+        "confidence" => 0.92,
+        "timestamp_ns" => 0,
+    ))
+    ZMQ.send(pub, "trade." * signal_json)
+    ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
+    ZMQ.send(pub, "trade." * signal_json)
+
+    sleep(1.0)
+    stop!(engine)
+    wait(t)
+
+    @test length(decisions) == 2
+    @test all(d -> d.signal.ticker == "BTC-USD", decisions)
+
+    ZMQ.close(pub)
+    ZMQ.close(ctx)
+    rm(endpoint, force = true)
+end
+
+@testset "ZMQ reconnection" begin
+    endpoint = "ipc:///tmp/dendrite-test-reconnect-$(getpid()).ipc"
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 2.0,
+        reconnect_interval_s = 0.1,
+        max_reconnect_attempts = 5,
+    )
+    wait(t)
+
+    # Should have exited cleanly after timeout
+    @test isempty(decisions)
+    rm(endpoint, force = true)
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
