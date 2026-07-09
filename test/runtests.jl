@@ -35,42 +35,46 @@ using DendriteTrader
         # Valid signal returns nothing
         @test validate_signal(valid) === nothing
 
-        # Zero timestamp is accepted
+        # Zero timestamp is rejected (contract: timestamp_ns > 0)
         zero_ts = copy(valid); zero_ts["timestamp_ns"] = 0
-        @test validate_signal(zero_ts) === nothing
+        res = validate_signal(zero_ts)
+        @test res isa String && occursin("timestamp", res)
 
         # Missing each required field returns error
         for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
             d = copy(valid)
             delete!(d, field)
-            @test validate_signal(d) isa String
-            @test occursin(field, validate_signal(d))
+            res = validate_signal(d)
+            @test res isa String && occursin(field, res)
         end
 
         # Empty ticker returns error
         empty_ticker = copy(valid); empty_ticker["ticker"] = ""
-        @test occursin("ticker", validate_signal(empty_ticker))
+        res = validate_signal(empty_ticker)
+        @test res isa String && occursin("ticker", res)
 
         # Invalid side returns error
         for bad_side in ("hold", "Buy", "", "BUY SELL")
             d = copy(valid); d["side"] = bad_side
             r = validate_signal(d)
-            @test r isa String
-            @test occursin("side", r)
+            @test r isa String && occursin("side", r)
         end
 
         # Negative price returns error
         neg_price = copy(valid); neg_price["price"] = -1.0
-        @test occursin("price", validate_signal(neg_price))
+        res = validate_signal(neg_price)
+        @test res isa String && occursin("price", res)
 
         # Zero price returns error
         zero_price = copy(valid); zero_price["price"] = 0.0
-        @test occursin("price", validate_signal(zero_price))
+        res = validate_signal(zero_price)
+        @test res isa String && occursin("price", res)
 
         # Confidence out of range returns error
         for bad_conf in (-0.1, 1.1, -1.0, 2.0)
             d = copy(valid); d["confidence"] = bad_conf
-            @test occursin("confidence", validate_signal(d))
+            res = validate_signal(d)
+            @test res isa String && occursin("confidence", res)
         end
 
         # Boundary confidence values are accepted
@@ -81,35 +85,43 @@ using DendriteTrader
 
         # Bool rejected for price
         bool_price = copy(valid); bool_price["price"] = true
-        @test occursin("number", validate_signal(bool_price))
+        res = validate_signal(bool_price)
+        @test res isa String && occursin("number", res)
 
         # Bool rejected for confidence
         bool_conf = copy(valid); bool_conf["confidence"] = false
-        @test occursin("number", validate_signal(bool_conf))
+        res = validate_signal(bool_conf)
+        @test res isa String && occursin("number", res)
 
         # Bool rejected for timestamp
         bool_ts = copy(valid); bool_ts["timestamp_ns"] = true
-        @test occursin("integer", validate_signal(bool_ts))
+        res = validate_signal(bool_ts)
+        @test res isa String && occursin("integer", res)
 
         # NaN rejected for price
         nan_price = copy(valid); nan_price["price"] = NaN
-        @test occursin("finite", validate_signal(nan_price))
+        res = validate_signal(nan_price)
+        @test res isa String && occursin("finite", res)
 
         # Inf rejected for price
         inf_price = copy(valid); inf_price["price"] = Inf
-        @test occursin("finite", validate_signal(inf_price))
+        res = validate_signal(inf_price)
+        @test res isa String && occursin("finite", res)
 
         # NaN rejected for confidence
         nan_conf = copy(valid); nan_conf["confidence"] = NaN
-        @test occursin("finite", validate_signal(nan_conf))
+        res = validate_signal(nan_conf)
+        @test res isa String && occursin("finite", res)
 
         # Inf rejected for confidence
         inf_conf = copy(valid); inf_conf["confidence"] = Inf
-        @test occursin("finite", validate_signal(inf_conf))
+        res = validate_signal(inf_conf)
+        @test res isa String && occursin("finite", res)
 
         # Negative timestamp returns error
         neg_ts = copy(valid); neg_ts["timestamp_ns"] = -1
-        @test occursin("timestamp", validate_signal(neg_ts))
+        res = validate_signal(neg_ts)
+        @test res isa String && occursin("timestamp", res)
     end
 
     @testset "ExecutionEngine — confidence gate" begin

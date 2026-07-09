@@ -182,8 +182,8 @@ function validate_signal(d::Dict)
     if timestamp isa Bool || !(timestamp isa Integer)
         return "timestamp_ns must be an integer, got: $(typeof(timestamp))"
     end
-    if timestamp < 0
-        return "timestamp_ns must be non-negative, got: $timestamp"
+    if timestamp <= 0
+        return "timestamp_ns must be positive, got: $timestamp"
     end
 
     return nothing
