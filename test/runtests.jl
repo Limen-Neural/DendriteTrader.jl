@@ -35,9 +35,9 @@ using DendriteTrader
         # Valid signal returns nothing
         @test validate_signal(valid) === nothing
 
-        # Zero timestamp is accepted
+        # Zero timestamp is rejected (must be > 0 per contract)
         zero_ts = copy(valid); zero_ts["timestamp_ns"] = 0
-        @test validate_signal(zero_ts) === nothing
+        @test occursin("timestamp", validate_signal(zero_ts))
 
         # Missing each required field returns error
         for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
@@ -289,7 +289,7 @@ using DendriteTrader
             rl = RateLimiter(requests_per_second = 100.0, burst = 5.0)
             @test rl.tokens == 5.0
             acquire!(rl)
-            @test rl.tokens ≈ 4.0 atol = 0.1
+            @test rl.tokens ≈ 4.0 atol = 0.01
         end
 
         @testset "set_rate! changes refill rate" begin
