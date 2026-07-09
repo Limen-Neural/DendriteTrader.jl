@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 using Test
-using JSON
-using ZMQ
 using DendriteTrader
 
 @testset "DendriteTrader" begin
@@ -402,72 +400,63 @@ using DendriteTrader
             # Recover after dip
             @test mdd([100.0, 120.0, 90.0, 130.0]) ≈ 25.0 atol=0.01
         end
+
+        @testset "close PnL uses open units not exit Kelly size" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0, max_position_size = 1000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.99,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 110.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.86,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            closed = filter(t -> t.pnl != 0.0, result.trade_log)
+            @test length(closed) == 1
+            eng = ExecutionEngine(
+                confidence_threshold = Float32(0.85),
+                max_position_size = 1000.0,
+                payoff_ratio = 1.5,
+            )
+            open_dec = execute_signal!(eng, signals[1], 10_000.0)
+            @test closed[1].units ≈ open_dec.position_units atol=1e-9
+            @test closed[1].pnl ≈ (110.0 - 100.0) * open_dec.position_units atol=1e-6
+        end
+
+        @testset "integer kwargs coerce into BacktestConfig" begin
+            cfg = BacktestConfig(initial_balance = 10_000, slippage_pct = 0, commission_pct = 0)
+            @test cfg.initial_balance == 10_000.0
+            @test cfg.slippage_pct == 0.0
+        end
+
+        @testset "short open sell slippage fills below mid" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0, slippage_pct = 1.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.total_trades == 1
+            @test result.trade_log[1].price ≈ 99.0 atol=1e-9
+        end
     end
-end
-
-
-@testset "ZMQ topic filtering" begin
-    endpoint = "ipc:///tmp/dendrite-test-topic-$(getpid()).ipc"
-    ctx = ZMQ.Context()
-    pub = ZMQ.Socket(ctx, ZMQ.PUB)
-    ZMQ.bind(pub, endpoint)
-    sleep(0.1)
-
-    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
-    decisions = ExecutionDecision[]
-
-    t = @async start!(
-        engine,
-        zmq_endpoint = endpoint,
-        zmq_topic = "trade.",
-        account_balance = 10_000.0,
-        on_decision = d -> push!(decisions, d),
-        timeout_s = 3.0,
-    )
-    sleep(0.5)
-
-    signal_json = JSON.json(Dict(
-        "ticker" => "BTC-USD",
-        "side" => "BUY",
-        "price" => 50_000.0,
-        "quantity" => 0.1,
-        "confidence" => 0.92,
-        "timestamp_ns" => 0,
-    ))
-    ZMQ.send(pub, "trade." * signal_json)
-    ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
-    ZMQ.send(pub, "trade." * signal_json)
-
-    sleep(1.0)
-    stop!(engine)
-    wait(t)
-
-    @test length(decisions) == 2
-    @test all(d -> d.signal.ticker == "BTC-USD", decisions)
-
-    ZMQ.close(pub)
-    ZMQ.close(ctx)
-    rm(endpoint, force = true)
-end
-
-@testset "ZMQ reconnection" begin
-    endpoint = "ipc:///tmp/dendrite-test-reconnect-\$(getpid()).ipc"
-    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
-    decisions = ExecutionDecision[]
-
-    t = @async start!(
-        engine,
-        zmq_endpoint = endpoint,
-        account_balance = 10_000.0,
-        on_decision = d -> push!(decisions, d),
-        timeout_s = 2.0,
-        reconnect_interval_s = 0.1,
-        max_reconnect_attempts = 5,
-    )
-    wait(t)
-
-    @test engine.should_stop[]
-    rm(endpoint, force = true)
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)

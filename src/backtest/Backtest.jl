@@ -56,14 +56,21 @@ struct BacktestConfig
 end
 
 function BacktestConfig(;
-    initial_balance::Float64 = 10_000.0,
-    confidence_threshold::Float32 = Float32(0.85),
-    payoff_ratio::Float64 = 1.5,
-    max_position_size::Float64 = 10.0,
-    slippage_pct::Float64 = 0.0,
-    commission_pct::Float64 = 0.0,
+    initial_balance = 10_000.0,
+    confidence_threshold = 0.85f0,
+    payoff_ratio = 1.5,
+    max_position_size = 10.0,
+    slippage_pct = 0.0,
+    commission_pct = 0.0,
 )
-    BacktestConfig(initial_balance, confidence_threshold, payoff_ratio, max_position_size, slippage_pct, commission_pct)
+    BacktestConfig(
+        Float64(initial_balance),
+        Float32(confidence_threshold),
+        Float64(payoff_ratio),
+        Float64(max_position_size),
+        Float64(slippage_pct),
+        Float64(commission_pct),
+    )
 end
 
 """
@@ -121,10 +128,38 @@ struct BacktestResult
 end
 
 """
+    OpenPosition
+
+Open position state: entry price, opened units, and side (long/short).
+"""
+struct OpenPosition
+    entry_price::Float64
+    units::Float64
+    side::TradeSide
+end
+
+"""
+    apply_slippage(price, side, slippage_pct) -> Float64
+
+Adverse market-order slippage: buys fill higher, sells fill lower.
+"""
+function apply_slippage(price::Float64, side::TradeSide, slippage_pct::Float64)
+    if side == Buy
+        return price * (1.0 + slippage_pct / 100.0)
+    elseif side == Sell
+        return price * (1.0 - slippage_pct / 100.0)
+    else
+        return price
+    end
+end
+
+"""
     run_backtest(config, signals) -> BacktestResult
 
 Replay signals through the ExecutionEngine and compute performance metrics.
 Applies slippage and commission when configured.
+
+Close PnL always uses the units stored at open (not the exit signal's Kelly size).
 """
 function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::BacktestResult
     engine = ExecutionEngine(
@@ -136,62 +171,70 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     equity_curve = Float64[config.initial_balance]
     trade_log = TradeRecord[]
     balance = config.initial_balance
-    positions = Dict{String, Float64}()  # ticker -> entry_price
+    positions = Dict{String, OpenPosition}()
 
     for signal in signals
-        prev_balance = balance
         decision = execute_signal!(engine, signal, balance)
 
-        # Record trade if executed
         if decision.executed
-            # Apply slippage to execution price
-            if signal.side == Buy
-                execution_price = signal.price * (1.0 + config.slippage_pct / 100.0)
-            else
-                execution_price = signal.price * (1.0 - config.slippage_pct / 100.0)
-            end
+            execution_price = apply_slippage(signal.price, signal.side, config.slippage_pct)
+            open_pos = get(positions, signal.ticker, nothing)
 
-            # Apply commission
-            commission = decision.position_units * execution_price * (config.commission_pct / 100.0)
-            balance -= commission
+            if open_pos !== nothing && (
+                (open_pos.side == Buy && signal.side == Sell) ||
+                (open_pos.side == Sell && signal.side == Buy)
+            )
+                # Close using opened units (not exit Kelly size)
+                entry_units = open_pos.units
+                entry_price = open_pos.entry_price
+                commission = entry_units * execution_price * (config.commission_pct / 100.0)
+                balance -= commission
 
-            if signal.side == Buy
-                # Opening a long position
-                positions[signal.ticker] = execution_price
-            elseif signal.side == Sell && haskey(positions, signal.ticker)
-                # Closing a position — compute PnL
-                entry_price = pop!(positions, signal.ticker)
-                pnl = (execution_price - entry_price) * decision.position_units
-                balance += pnl
+                if open_pos.side == Buy
+                    gross_pnl = (execution_price - entry_price) * entry_units
+                else
+                    gross_pnl = (entry_price - execution_price) * entry_units
+                end
+                pnl = gross_pnl - commission
+                balance += gross_pnl
+                delete!(positions, signal.ticker)
 
-                trade = TradeRecord(
-                    signal.ticker,
-                    string(signal.side),
-                    signal.timestamp_ns,
-                    execution_price,
-                    decision.position_units,
-                    decision.kelly_fraction,
-                    pnl,
+                push!(
+                    trade_log,
+                    TradeRecord(
+                        signal.ticker,
+                        string(signal.side),
+                        signal.timestamp_ns,
+                        execution_price,
+                        entry_units,
+                        decision.kelly_fraction,
+                        pnl,
+                    ),
                 )
-                push!(trade_log, trade)
             else
-                # Opening a new position (sell short or buy)
-                positions[signal.ticker] = execution_price
+                units = decision.position_units
+                commission = units * execution_price * (config.commission_pct / 100.0)
+                balance -= commission
+                positions[signal.ticker] = OpenPosition(execution_price, units, signal.side)
 
-                trade = TradeRecord(
-                    signal.ticker,
-                    string(signal.side),
-                    signal.timestamp_ns,
-                    execution_price,
-                    decision.position_units,
-                    decision.kelly_fraction,
-                    0.0,  # PnL computed on close
-                )
-                push!(trade_log, trade)
+                # Long opens are silent until close; short opens logged with pnl=0
+                if signal.side == Sell
+                    push!(
+                        trade_log,
+                        TradeRecord(
+                            signal.ticker,
+                            string(signal.side),
+                            signal.timestamp_ns,
+                            execution_price,
+                            units,
+                            decision.kelly_fraction,
+                            0.0,
+                        ),
+                    )
+                end
             end
         end
 
-        # Update equity curve after processing
         push!(equity_curve, balance)
     end
 
