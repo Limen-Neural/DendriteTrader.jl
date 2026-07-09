@@ -328,6 +328,8 @@ Signal the engine to stop its ZMQ listener loop.
 Call this from another task or thread to gracefully shut down `start!`.
 """
 function stop!(engine::ExecutionEngine)
+    # Threads.Atomic supports getindex/setindex! (engine.should_stop[]);
+    # Threads.atomic_store!/atomic_load are for AtomicMemory / lower-level APIs.
     engine.should_stop[] = true
 end
 
