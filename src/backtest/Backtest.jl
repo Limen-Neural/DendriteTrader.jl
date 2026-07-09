@@ -26,7 +26,7 @@ module Backtest
 
 using JSON
 using Printf
-using ..DendriteTrader: TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, execute_signal!, SignalEvent, events
+using ..DendriteTrader: TradeSignal, Buy, Sell, Neutral, ExecutionEngine, execute_signal!, SignalEvent, events
 
 export BacktestConfig, BacktestResult
 export run_backtest, print_summary
@@ -61,18 +61,35 @@ function BacktestConfig(;
 end
 
 """
+    OpenPosition
+
+Internal open position tracked by the backtest engine.
+
+# Fields
+- `entry_price`: price at which the position was opened
+- `units`: position size from the opening decision
+- `is_long`: `true` for long, `false` for short
+"""
+struct OpenPosition
+    entry_price::Float64
+    units::Float64
+    is_long::Bool
+end
+
+"""
     TradeRecord
 
 Record of a single trade in the backtest.
 
 # Fields
 - `ticker`: market symbol
-- `side`: BUY or SELL
+- `side`: BUY or SELL (closing side for closed trades)
 - `entry_time`: signal timestamp (ns)
 - `price`: execution price
-- `units`: position size
-- `kelly_fraction`: Kelly fraction used
-- `pnl`: realized PnL (0.0 until closed)
+- `units`: position size (entry units for closed trades)
+- `kelly_fraction`: Kelly fraction used on the closing signal
+- `pnl`: realized PnL (meaningful when `is_closed`)
+- `is_closed`: whether this record is a closed (round-trip) trade
 """
 struct TradeRecord
     ticker::String
@@ -82,6 +99,7 @@ struct TradeRecord
     units::Float64
     kelly_fraction::Float64
     pnl::Float64
+    is_closed::Bool
 end
 
 """
@@ -129,48 +147,69 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     equity_curve = Float64[config.initial_balance]
     trade_log = TradeRecord[]
     balance = config.initial_balance
-    positions = Dict{String, Float64}()  # ticker -> entry_price
+    # ticker -> OpenPosition (entry price, entry units, long/short)
+    positions = Dict{String, OpenPosition}()
 
     for signal in signals
-        prev_balance = balance
         decision = execute_signal!(engine, signal, balance)
 
-        # Record trade if executed
+        # Update positions / realized PnL when the engine executes
         if decision.executed
+            ticker = signal.ticker
+            open_pos = get(positions, ticker, nothing)
+
             if signal.side == Buy
-                # Opening a long position
-                positions[signal.ticker] = signal.price
-            elseif signal.side == Sell && haskey(positions, signal.ticker)
-                # Closing a position — compute PnL
-                entry_price = pop!(positions, signal.ticker)
-                pnl = (signal.price - entry_price) * decision.position_units
-                balance += pnl
-
-                trade = TradeRecord(
-                    signal.ticker,
-                    string(signal.side),
-                    signal.timestamp_ns,
-                    signal.price,
-                    decision.position_units,
-                    decision.kelly_fraction,
-                    pnl,
-                )
-                push!(trade_log, trade)
-            else
-                # Opening a new position (sell short or buy)
-                positions[signal.ticker] = signal.price
-
-                trade = TradeRecord(
-                    signal.ticker,
-                    string(signal.side),
-                    signal.timestamp_ns,
-                    signal.price,
-                    decision.position_units,
-                    decision.kelly_fraction,
-                    0.0,  # PnL computed on close
-                )
-                push!(trade_log, trade)
+                if open_pos === nothing
+                    # Open long using the buy-side sized units
+                    positions[ticker] = OpenPosition(signal.price, decision.position_units, true)
+                elseif !open_pos.is_long
+                    # Close short with long-side entry units (not the closing signal's Kelly size)
+                    pop!(positions, ticker)
+                    units = open_pos.units
+                    pnl = (open_pos.entry_price - signal.price) * units
+                    balance += pnl
+                    push!(
+                        trade_log,
+                        TradeRecord(
+                            ticker,
+                            string(signal.side),
+                            signal.timestamp_ns,
+                            signal.price,
+                            units,
+                            decision.kelly_fraction,
+                            pnl,
+                            true,
+                        ),
+                    )
+                end
+                # If already long: ignore subsequent buys (preserve first entry; no silent overwrite)
+            elseif signal.side == Sell
+                if open_pos !== nothing && open_pos.is_long
+                    # Close long using stored buy-side units
+                    pop!(positions, ticker)
+                    units = open_pos.units
+                    pnl = (signal.price - open_pos.entry_price) * units
+                    balance += pnl
+                    push!(
+                        trade_log,
+                        TradeRecord(
+                            ticker,
+                            string(signal.side),
+                            signal.timestamp_ns,
+                            signal.price,
+                            units,
+                            decision.kelly_fraction,
+                            pnl,
+                            true,
+                        ),
+                    )
+                elseif open_pos === nothing
+                    # Open short using the sell-side sized units
+                    positions[ticker] = OpenPosition(signal.price, decision.position_units, false)
+                end
+                # If already short: ignore subsequent sells (preserve first entry)
             end
+            # Neutral (and other) sides are ignored for position state
         end
 
         # Update equity curve after processing
@@ -180,7 +219,8 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     final_balance = balance
     total_return = (final_balance - config.initial_balance) / config.initial_balance * 100.0
     max_dd = compute_max_drawdown(equity_curve)
-    closed_trades = filter(t -> t.pnl != 0.0, trade_log)
+    # Only closed trades enter the log; include break-even (pnl == 0) in win rate
+    closed_trades = filter(t -> t.is_closed, trade_log)
     num_winning = count(t -> t.pnl > 0.0, closed_trades)
     wr = isempty(closed_trades) ? 0.0 : num_winning / length(closed_trades)
 
@@ -194,7 +234,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
         total_return,
         max_dd,
         wr,
-        length(trade_log),
+        length(closed_trades),
     )
 end
 
@@ -215,9 +255,12 @@ function compute_max_drawdown(equity::Vector{Float64})
         if val > peak
             peak = val
         end
-        dd = (peak - val) / peak * 100.0
-        if dd > max_dd
-            max_dd = dd
+        # Avoid division by zero / NaN when the peak is non-positive
+        if peak > 0.0
+            dd = (peak - val) / peak * 100.0
+            if dd > max_dd
+                max_dd = dd
+            end
         end
     end
 
@@ -252,6 +295,9 @@ end
 Format a number as currency with commas.
 """
 function format_currency(val::Float64)
+    if !isfinite(val)
+        return string(val)
+    end
     sign = val < 0 ? "-" : ""
     s = @sprintf("%.2f", abs(val))
     int_part, dec_part = split(s, ".")
@@ -349,6 +395,7 @@ function export_trade_log_json(result::BacktestResult, path::String)
             "units" => t.units,
             "kelly_fraction" => t.kelly_fraction,
             "pnl" => t.pnl,
+            "is_closed" => t.is_closed,
         ) for t in result.trade_log
     ]
 

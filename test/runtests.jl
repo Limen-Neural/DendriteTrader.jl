@@ -227,6 +227,7 @@ using DendriteTrader
         end
 
         @testset "run_backtest with buy+sell — PnL computed" begin
+            # max_position_size default 10.0 caps Kelly units → deterministic PnL
             cfg = BacktestConfig(initial_balance = 10_000.0)
             signals = [
                 TradeSignal(Dict(
@@ -247,11 +248,67 @@ using DendriteTrader
                 )),
             ]
             result = run_backtest(cfg, signals)
-            @test result.final_balance != cfg.initial_balance
-            @test result.total_return != 0.0
-            closed = filter(t -> t.pnl != 0.0, result.trade_log)
-            @test length(closed) >= 1
-            @test closed[1].pnl > 0.0  # bought at 100, sold at 110
+            # units capped at 10.0 → pnl = (110 - 100) * 10 = 100
+            @test result.final_balance ≈ 10_100.0
+            @test result.total_return ≈ 1.0
+            closed = filter(t -> t.is_closed, result.trade_log)
+            @test length(closed) == 1
+            @test closed[1].pnl ≈ 100.0
+            @test closed[1].units ≈ 10.0  # buy-side units, not sell-side Kelly
+        end
+
+        @testset "run_backtest short open+close — correct short PnL" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 90.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            # short 100 → cover 90 with 10 units → pnl = (100 - 90) * 10 = 100
+            closed = filter(t -> t.is_closed, result.trade_log)
+            @test length(closed) == 1
+            @test closed[1].pnl ≈ 100.0
+            @test result.final_balance ≈ 10_100.0
+        end
+
+        @testset "run_backtest break-even close included in win rate" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.total_trades == 1
+            @test result.win_rate == 0.0  # closed, flat — not a win, but counted
+            @test result.final_balance ≈ 10_000.0
         end
 
         @testset "run_backtest with neutral signals — no trades" begin
@@ -294,6 +351,9 @@ using DendriteTrader
             @test fmt(-5000.10) == "-5,000.10"
             @test fmt(0.0) == "0.00"
             @test fmt(1_000_000.00) == "1,000,000.00"
+            @test fmt(NaN) == "NaN"
+            @test fmt(Inf) == "Inf"
+            @test fmt(-Inf) == "-Inf"
         end
 
         @testset "compute_max_drawdown" begin
@@ -302,10 +362,13 @@ using DendriteTrader
             @test mdd([100.0, 100.0, 100.0]) == 0.0
             # Single element → 0
             @test mdd([100.0]) == 0.0
-            # Dip from 100 to 80 → 20% drawdown
+            # Peak 110 → 88 is (110-88)/110 = 20% drawdown
             @test mdd([100.0, 110.0, 88.0]) ≈ 20.0 atol=0.01
             # Recover after dip
             @test mdd([100.0, 120.0, 90.0, 130.0]) ≈ 25.0 atol=0.01
+            # Non-positive peak must not yield NaN
+            @test mdd([0.0, 0.0, 0.0]) == 0.0
+            @test !isnan(mdd([0.0, -1.0, 0.0]))
         end
     end
 end
