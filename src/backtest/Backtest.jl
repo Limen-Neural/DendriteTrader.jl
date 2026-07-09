@@ -136,6 +136,14 @@ end
     run_backtest(config, signals) -> BacktestResult
 
 Replay signals through the ExecutionEngine and compute performance metrics.
+
+# Position model
+- Positions are tracked as `(entry_price, entry_units, is_long)`.
+- A closing signal fully closes the open position using the **entry** units
+  (all-or-nothing; partial cover / flip is not supported).
+- Open positions remaining at the end of the signal stream are **not**
+  marked-to-market; metrics reflect closed round-trips only.
+- A second same-side signal while already open is ignored (first entry kept).
 """
 function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::BacktestResult
     engine = ExecutionEngine(
