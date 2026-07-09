@@ -407,7 +407,7 @@ end
 
 
 @testset "ZMQ topic filtering" begin
-    endpoint = "ipc:///tmp/dendrite-test-topic-\$(getpid()).ipc"
+    endpoint = "ipc:///tmp/dendrite-test-topic-$(getpid()).ipc"
     ctx = ZMQ.Context()
     pub = ZMQ.Socket(ctx, ZMQ.PUB)
     ZMQ.bind(pub, endpoint)
