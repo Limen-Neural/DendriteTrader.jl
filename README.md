@@ -190,7 +190,7 @@ set_rate!(limiter, 20.0)
 | `acquire!(limiter)` | Block until a token is available. Refills tokens based on elapsed time. Thread-safe. |
 | `set_rate!(limiter, requests_per_second)` | Update the refill rate at runtime. Thread-safe. |
 
-### Integrating with DydxClient
+### Integrating RateLimiter with DydxClient
 
 ```julia
 limiter = RateLimiter(requests_per_second = 5.0, burst = 5.0)
@@ -242,7 +242,7 @@ cache_size(cache)
 | `cache_size(cache)` | Return the number of cached entries. |
 | `is_fresh(cache, ticker)` | Return `true` if the cached entry is within TTL. |
 
-### Integrating with DydxClient
+### Integrating PriceCache with DydxClient
 
 ```julia
 cache = PriceCache(ttl_s = 10.0)
