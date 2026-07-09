@@ -136,6 +136,7 @@ struct OpenPosition
     entry_price::Float64
     units::Float64
     side::TradeSide
+    entry_commission::Float64
 end
 
 """
@@ -195,7 +196,8 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 else
                     gross_pnl = (entry_price - execution_price) * entry_units
                 end
-                pnl = gross_pnl - commission
+                # Include entry commission so trade_log PnL reconciles with cash
+                pnl = gross_pnl - commission - open_pos.entry_commission
                 balance += gross_pnl
                 delete!(positions, signal.ticker)
 
@@ -211,11 +213,16 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                         pnl,
                     ),
                 )
+            elseif open_pos !== nothing && open_pos.side == signal.side
+                # Same-side re-entry: do not overwrite / drop the open position
+                # (would leak open commission and never realize prior PnL)
+                nothing
             else
                 units = decision.position_units
                 commission = units * execution_price * (config.commission_pct / 100.0)
                 balance -= commission
-                positions[signal.ticker] = OpenPosition(execution_price, units, signal.side)
+                positions[signal.ticker] =
+                    OpenPosition(execution_price, units, signal.side, commission)
 
                 # Long opens are silent until close; short opens logged with pnl=0
                 if signal.side == Sell
