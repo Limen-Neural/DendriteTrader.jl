@@ -774,6 +774,25 @@ end
 # ── ZMQ Signal Listener ───────────────────────────────────────────────────────
 
 """
+    strip_zmq_topic(msg, topic) -> String
+
+Remove a ZMQ topic prefix from `msg` using byte (codeunit) length so multi-byte
+UTF-8 topics are stripped correctly. Falls back to the full message when the
+topic is empty or not a prefix.
+"""
+function strip_zmq_topic(msg::AbstractString, topic::AbstractString)
+    if isempty(topic) || !startswith(msg, topic)
+        return String(msg)
+    end
+    # ncodeunits is the correct end-of-prefix byte index for UTF-8 strings
+    prefix_bytes = ncodeunits(topic)
+    if prefix_bytes >= ncodeunits(msg)
+        return ""
+    end
+    return msg[nextind(msg, prefix_bytes):end]
+end
+
+"""
     start!(engine; zmq_endpoint, zmq_topic, account_balance, on_decision,
            timeout_s, reconnect_interval_s, max_reconnect_attempts)
 
@@ -836,9 +855,14 @@ function start!(
             break
         end
 
-        ctx = ZMQ.Context()
-        socket = ZMQ.Socket(ctx, ZMQ.SUB)
+        ctx = nothing
+        socket = nothing
+        received_ok = false
         try
+            # Construct inside try so allocation failures are reconnectable
+            # and do not leak a Context if Socket construction throws.
+            ctx = ZMQ.Context()
+            socket = ZMQ.Socket(ctx, ZMQ.SUB)
             ZMQ.subscribe(socket, zmq_topic)
             ZMQ.connect(socket, zmq_endpoint)
 
@@ -846,9 +870,6 @@ function start!(
             socket.rcvtimeo = 1000
 
             @info "[execution] ZMQ SUB connected to $zmq_endpoint (topic=\"$(zmq_topic)\")"
-
-            # Reset reconnect count on successful connection
-            reconnect_count = 0
 
             while !engine.should_stop[]
                 if timeout_s !== nothing && (time() - start_time) >= timeout_s
@@ -858,24 +879,22 @@ function start!(
 
                 try
                     msg = String(ZMQ.recv(socket))
-                    # Strip topic prefix if present
-                    payload = if !isempty(zmq_topic) && startswith(msg, zmq_topic)
-                        msg[nextind(msg, length(zmq_topic)):end]
-                    else
-                        msg
-                    end
+                    payload = strip_zmq_topic(msg, zmq_topic)
                     data = JSON.parse(payload)
 
                     # Validate signal before processing
                     err = validate_signal(data)
                     if err !== nothing
                         @warn "[execution] Invalid signal: $err"
+                        received_ok = true
                         continue
                     end
 
                     signal = TradeSignal(data)
                     decision = execute_signal!(engine, signal, account_balance)
                     on_decision(decision)
+                    # Only reset reconnect budget after useful work on the socket
+                    received_ok = true
                 catch e
                     if e isa ZMQ.TimeoutError
                         # recv timeout, loop back to check should_stop
@@ -884,7 +903,9 @@ function start!(
                         @warn "[execution] ZMQ socket state error, reconnecting: $e"
                         break  # break inner loop to reconnect
                     else
-                        rethrow(e)
+                        # Application-level errors (JSON, callback): log, keep listening
+                        @warn "[execution] Message handling error (not reconnecting): $e"
+                        continue
                     end
                 end
             end
@@ -895,8 +916,23 @@ function start!(
                 @warn "[execution] ZMQ connection error: $e"
             end
         finally
-            ZMQ.close(socket)
-            ZMQ.close(ctx)
+            if socket !== nothing
+                try
+                    ZMQ.close(socket)
+                catch
+                end
+            end
+            if ctx !== nothing
+                try
+                    ZMQ.close(ctx)
+                catch
+                end
+            end
+        end
+
+        # Reset reconnect counter only after the socket actually received data
+        if received_ok
+            reconnect_count = 0
         end
 
         # If we exited normally (should_stop or timeout), don't reconnect
