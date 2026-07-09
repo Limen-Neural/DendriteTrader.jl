@@ -206,11 +206,16 @@ using DendriteTrader
         end
 
         @testset "get_cached returns nothing for expired entry" begin
-            cache = PriceCache(ttl_s = 0.01)
+            cache = PriceCache(ttl_s = 5.0)
             price = DydxPrice("SOL-USD", 100.0, 99.0, 101.0)
             put_cached!(cache, "SOL-USD", price)
-            sleep(0.02)
+            # Deterministic expiry: backdate the stored timestamp (no sleep)
+            lock(cache.lock) do
+                cache.times["SOL-USD"] = time() - 10.0
+            end
             @test get_cached(cache, "SOL-USD") === nothing
+            # get_cached lazily evicts expired entries
+            @test cache_size(cache) == 0
         end
 
         @testset "get_cached returns nothing for missing ticker" begin
