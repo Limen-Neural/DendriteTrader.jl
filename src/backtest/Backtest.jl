@@ -152,22 +152,35 @@ struct BacktestResult
     calmar_ratio::Float64
 end
 
-# Preserve the 10-argument positional constructor for backward compatibility
+# Preserve the 10-argument positional constructor for backward compatibility.
+# Accept Real/Integer and convert, matching the old generated constructor's
+# convertible argument behavior (and the BacktestConfig compatibility shim).
 function BacktestResult(
     config::BacktestConfig,
-    initial_balance::Float64,
-    final_balance::Float64,
+    initial_balance::Real,
+    final_balance::Real,
     equity_curve::Vector{Float64},
     trade_log::Vector{TradeRecord},
     events::Vector{SignalEvent},
-    total_return::Float64,
-    max_drawdown::Float64,
-    win_rate::Float64,
-    total_trades::Int,
+    total_return::Real,
+    max_drawdown::Real,
+    win_rate::Real,
+    total_trades::Integer,
 )
     BacktestResult(
-        config, initial_balance, final_balance, equity_curve, trade_log, events,
-        total_return, max_drawdown, win_rate, total_trades, 0.0, 0.0, 0.0,
+        config,
+        Float64(initial_balance),
+        Float64(final_balance),
+        equity_curve,
+        trade_log,
+        events,
+        Float64(total_return),
+        Float64(max_drawdown),
+        Float64(win_rate),
+        Int(total_trades),
+        0.0,
+        0.0,
+        0.0,
     )
 end
 
@@ -236,9 +249,11 @@ Kelly size). Slippage is adverse for market orders: buys fill higher, sells
 lower (also adverse for short entries). Annualization uses calendar span from
 signal timestamps when that span is at least one day.
 
-Same-side re-entries accumulate position units with weighted-average entry.
-Non-trade marks use unslipped signal prices. Calmar uses final equity (MTM).
-total_trades counts closed round-trips only.
+Same-side re-entries accumulate position units with weighted-average entry,
+capping added units at `max_position_size` and charging commission only on
+units actually added. Non-trade marks use unslipped signal prices. Calmar
+uses final equity (MTM). total_trades counts closed round-trips (including
+flat closes with zero PnL); same-side fills are not closed trades.
 """
 function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::BacktestResult
     engine = ExecutionEngine(
@@ -249,6 +264,8 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
 
     equity_curve = Float64[config.initial_balance]
     trade_log = TradeRecord[]
+    # Closed round-trips only (includes flat closes with pnl == 0); excludes same-side fills
+    closed_trades = TradeRecord[]
     balance = config.initial_balance
     # ticker -> open position (entry price, opened units, side, entry commission)
     positions = Dict{String, OpenPosition}()
@@ -281,25 +298,31 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 balance += gross_pnl
                 delete!(positions, signal.ticker)
 
-                push!(
-                    trade_log,
-                    TradeRecord(
-                        signal.ticker,
-                        string(signal.side),
-                        signal.timestamp_ns,
-                        execution_price,
-                        entry_units,
-                        decision.kelly_fraction,
-                        pnl,
-                    ),
+                close_rec = TradeRecord(
+                    signal.ticker,
+                    string(signal.side),
+                    signal.timestamp_ns,
+                    execution_price,
+                    entry_units,
+                    decision.kelly_fraction,
+                    pnl,
                 )
+                push!(trade_log, close_rec)
+                push!(closed_trades, close_rec)
             elseif open_pos !== nothing && open_pos.side == signal.side
-                # Same-side re-entry: accumulate units, weighted-average entry, charge commission
+                # Same-side re-entry: accumulate units (capped), weighted-average entry,
+                # charge commission only on units actually added
                 new_units = decision.position_units
-                new_commission = new_units * execution_price * (config.commission_pct / 100.0)
+                room = max(0.0, config.max_position_size - open_pos.units)
+                actual_new_units = min(new_units, room)
+                new_commission = actual_new_units * execution_price * (config.commission_pct / 100.0)
                 balance -= new_commission
-                total_units = min(open_pos.units + new_units, config.max_position_size)
-                weighted_entry = (open_pos.entry_price * open_pos.units + execution_price * new_units) / total_units
+                total_units = open_pos.units + actual_new_units
+                weighted_entry = if total_units > 0.0
+                    (open_pos.entry_price * open_pos.units + execution_price * actual_new_units) / total_units
+                else
+                    open_pos.entry_price
+                end
                 positions[signal.ticker] = OpenPosition(
                     weighted_entry,
                     total_units,
@@ -307,7 +330,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                     open_pos.entry_commission + new_commission,
                     signal.price,
                 )
-                # Record same-side fill in trade_log for ledger completeness
+                # Record same-side fill in trade_log for ledger completeness (not a close)
                 push!(
                     trade_log,
                     TradeRecord(
@@ -315,7 +338,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                         string(signal.side),
                         signal.timestamp_ns,
                         execution_price,
-                        new_units,
+                        actual_new_units,
                         decision.kelly_fraction,
                         0.0,
                     ),
@@ -370,7 +393,6 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     final_balance = final_equity
     total_return = (final_equity - config.initial_balance) / config.initial_balance * 100.0
     max_dd = compute_max_drawdown(equity_curve)
-    closed_trades = filter(t -> t.pnl != 0.0, trade_log)
     num_winning = count(t -> t.pnl > 0.0, closed_trades)
     wr = isempty(closed_trades) ? 0.0 : num_winning / length(closed_trades)
 

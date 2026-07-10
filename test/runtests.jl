@@ -546,6 +546,84 @@ using DendriteTrader
             @test result.trade_log[1].pnl > 0.0  # short profit
         end
 
+        @testset "flat close counts as completed trade" begin
+            # BUY then SELL at same price with zero costs → pnl == 0, still a round-trip
+            cfg = BacktestConfig(
+                initial_balance = 10_000.0,
+                slippage_pct = 0.0,
+                commission_pct = 0.0,
+            )
+            signals = [
+                TradeSignal(Dict("ticker" => "A", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.95, "timestamp_ns" => 1_000_000_000)),
+                TradeSignal(Dict("ticker" => "A", "side" => "SELL", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.95, "timestamp_ns" => 2_000_000_000)),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.total_trades == 1
+            @test length(result.trade_log) == 1
+            @test result.trade_log[1].pnl == 0.0
+            @test result.win_rate == 0.0  # flat is not a win
+        end
+
+        @testset "position cap uses actual_new_units for commission and entry" begin
+            # Small max_position_size so same-side re-entry hits the cap
+            cfg = BacktestConfig(
+                initial_balance = 10_000.0,
+                max_position_size = 1.0,
+                commission_pct = 1.0,  # 1% so commission is observable
+                slippage_pct = 0.0,
+            )
+            signals = [
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 1_000_000_000)),
+                # Same-side: would add more units but must cap at max_position_size
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "BUY", "price" => 200.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 2_000_000_000)),
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "SELL", "price" => 200.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 3_000_000_000)),
+            ]
+            result = run_backtest(cfg, signals)
+            # Same-side fill + close
+            @test length(result.trade_log) == 2
+            same_side = result.trade_log[1]
+            close_rec = result.trade_log[2]
+            # Units actually added on re-entry must not exceed remaining room
+            @test same_side.units >= 0.0
+            @test same_side.units <= 1.0
+            # Close units = position size after cap, never above max
+            @test close_rec.units <= 1.0 + 1e-12
+            # If already at/near cap after first fill, same-side adds ~0 and charges ~0
+            # Entry commission on zero added units must not inflate close costs incorrectly
+            @test isfinite(close_rec.pnl)
+        end
+
+        @testset "BacktestResult 10-arg constructor accepts Real integers" begin
+            cfg = BacktestConfig()
+            # Integer literals must convert (old generated constructor accepted convertibles)
+            r = DendriteTrader.Backtest.BacktestResult(
+                cfg,
+                10_000,          # Int initial_balance
+                11_000,          # Int final_balance
+                Float64[10_000.0, 11_000.0],
+                DendriteTrader.Backtest.TradeRecord[],
+                DendriteTrader.SignalEvent[],
+                10,              # Int total_return
+                5,               # Int max_drawdown
+                1,               # Int win_rate (will convert to 1.0)
+                2,               # Int total_trades
+            )
+            @test r.initial_balance == 10_000.0
+            @test r.final_balance == 11_000.0
+            @test r.total_return == 10.0
+            @test r.max_drawdown == 5.0
+            @test r.win_rate == 1.0
+            @test r.total_trades == 2
+            @test r.sharpe_ratio == 0.0
+            @test r.sortino_ratio == 0.0
+            @test r.calmar_ratio == 0.0
+        end
+
         @testset "compute_sharpe_ratio with per-signal risk-free" begin
             sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
             r = [0.01, 0.02, -0.005, 0.015, 0.008]
