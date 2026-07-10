@@ -152,6 +152,25 @@ struct BacktestResult
     calmar_ratio::Float64
 end
 
+# Preserve the 10-argument positional constructor for backward compatibility
+function BacktestResult(
+    config::BacktestConfig,
+    initial_balance::Float64,
+    final_balance::Float64,
+    equity_curve::Vector{Float64},
+    trade_log::Vector{TradeRecord},
+    events::Vector{SignalEvent},
+    total_return::Float64,
+    max_drawdown::Float64,
+    win_rate::Float64,
+    total_trades::Int,
+)
+    BacktestResult(
+        config, initial_balance, final_balance, equity_curve, trade_log, events,
+        total_return, max_drawdown, win_rate, total_trades, 0.0, 0.0, 0.0,
+    )
+end
+
 """
     OpenPosition
 
@@ -279,7 +298,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 new_units = decision.position_units
                 new_commission = new_units * execution_price * (config.commission_pct / 100.0)
                 balance -= new_commission
-                total_units = open_pos.units + new_units
+                total_units = min(open_pos.units + new_units, config.max_position_size)
                 weighted_entry = (open_pos.entry_price * open_pos.units + execution_price * new_units) / total_units
                 positions[signal.ticker] = OpenPosition(
                     weighted_entry,
@@ -470,7 +489,7 @@ function compute_sharpe_ratio(returns::Vector{Float64}, risk_free_rate::Float64,
     if std_r < 1e-12
         return 0.0
     end
-    return (mean_r - rf) / std_r * sqrt(252.0)
+    return (mean_r - rf) / std_r * sqrt(252.0 * spd)
 end
 
 """
@@ -497,7 +516,7 @@ function compute_sortino_ratio(returns::Vector{Float64}, risk_free_rate::Float64
     if downside_dev < 1e-12
         return 0.0
     end
-    return mean_excess / downside_dev * sqrt(252.0)
+    return mean_excess / downside_dev * sqrt(252.0 * spd)
 end
 
 """
