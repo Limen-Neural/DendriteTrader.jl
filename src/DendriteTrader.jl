@@ -901,8 +901,8 @@ function start!(
                     if e isa ZMQ.TimeoutError
                         # recv timeout, loop back to check should_stop
                         continue
-                    elseif e isa ZMQ.StateError
-                        @warn "[execution] ZMQ socket state error, reconnecting: $e"
+                    elseif e isa ZMQ.StateError || e isa ZMQ.ZMQError
+                        @warn "[execution] ZMQ transport error, reconnecting: $e"
                         break  # break inner loop to reconnect
                     else
                         # Application-level errors (JSON, callback): log, keep listening
@@ -953,7 +953,12 @@ function start!(
         end
 
         @info "[execution] Reconnecting in $(reconnect_interval_s)s (attempt $reconnect_count)..."
-        sleep(reconnect_interval_s)
+        # Sleep in small chunks so stop!() can take effect promptly
+        elapsed = 0.0
+        while elapsed < reconnect_interval_s && !engine.should_stop[]
+            sleep(min(0.5, reconnect_interval_s - elapsed))
+            elapsed += 0.5
+        end
     end
 
     @info "[execution] ZMQ listener stopped"
