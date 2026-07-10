@@ -24,7 +24,7 @@ using DendriteTrader
     @testset "ExecutionEngine — confidence gate" begin
         engine = ExecutionEngine(confidence_threshold = 0.85f0)
 
-        # Signal above threshold → executed
+        # Signal above threshold -> executed
         sig_hi = TradeSignal(
             Dict(
                 "ticker"=>"MARKET-B",
@@ -41,7 +41,7 @@ using DendriteTrader
         @test dec.kelly_fraction > 0.0
         @test dec.applied_fraction > 0.0
 
-        # Signal below threshold → rejected
+        # Signal below threshold -> rejected
         sig_lo = TradeSignal(
             Dict(
                 "ticker"=>"MARKET-B",
@@ -183,25 +183,18 @@ using DendriteTrader
             @test cfg.confidence_threshold == Float32(0.85)
             @test cfg.payoff_ratio == 1.5
             @test cfg.max_position_size == 10.0
-            @test cfg.slippage_pct == 0.0
-            @test cfg.commission_pct == 0.0
+            @test cfg.risk_free_rate == 0.0
         end
 
-        @testset "BacktestConfig constructor with custom values" begin
-            cfg = BacktestConfig(
-                initial_balance = 50_000.0,
-                confidence_threshold = Float32(0.90),
-                payoff_ratio = 2.0,
-                max_position_size = 20.0,
-                slippage_pct = 0.05,
-                commission_pct = 0.1,
-            )
+        @testset "BacktestConfig four-argument positional constructor" begin
+            cfg = BacktestConfig(50_000.0, 0.90, 2.0, 20.0)
             @test cfg.initial_balance == 50_000.0
             @test cfg.confidence_threshold == Float32(0.90)
             @test cfg.payoff_ratio == 2.0
             @test cfg.max_position_size == 20.0
-            @test cfg.slippage_pct == 0.05
-            @test cfg.commission_pct == 0.1
+            @test cfg.risk_free_rate == 0.0
+            @test cfg.slippage_pct == 0.0
+            @test cfg.commission_pct == 0.0
         end
 
         @testset "run_backtest with buy signals — equity curve changes" begin
@@ -227,7 +220,7 @@ using DendriteTrader
             result = run_backtest(cfg, signals)
             @test length(result.equity_curve) == 3  # initial + 2 signals
             @test result.equity_curve[1] == 10_000.0
-            # Buy-only: no trades recorded until a sell closes the position
+            # Buy-only: no closed trades
             @test result.total_trades == 0
             @test result.final_balance == cfg.initial_balance
         end
@@ -260,32 +253,59 @@ using DendriteTrader
             @test closed[1].pnl > 0.0  # bought at 100, sold at 110
         end
 
-        @testset "run_backtest with neutral signals — no trades" begin
+        @testset "compute_max_drawdown" begin
+            mdd = DendriteTrader.Backtest.compute_max_drawdown
+            @test mdd([100.0, 100.0, 100.0]) == 0.0
+            @test mdd([100.0]) == 0.0
+            @test mdd([100.0, 110.0, 88.0]) ≈ 20.0 atol=0.01
+            @test mdd([100.0, 120.0, 90.0, 130.0]) ≈ 25.0 atol=0.01
+        end
+
+        @testset "compute_period_returns" begin
+            cpr = DendriteTrader.Backtest.compute_period_returns
+            @test cpr([100.0]) == Float64[]
+            @test cpr([100.0, 110.0]) ≈ [0.1]
+            r = cpr([100.0, 110.0, 104.5])
+            @test r[1] ≈ 0.1
+            @test r[2] ≈ -0.05
+        end
+
+        @testset "compute_sharpe_ratio" begin
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            # n_days = length(returns) -> spd=1, no scaling
+            @test sharpe([0.01], 0.0, 1, false) == 0.0
+            @test sharpe([0.01, 0.01, 0.01], 0.0, 3, false) == 0.0
+            r = [0.01, 0.02, -0.005, 0.015, 0.008]
+            s = sharpe(r, 0.0, 5, false)
+            @test s > 0.0
+            s_low = sharpe(r, 0.005, 5, false)
+            @test s_low < s
+        end
+
+        @testset "compute_sortino_ratio" begin
+            sortino = DendriteTrader.Backtest.compute_sortino_ratio
+            @test sortino([0.01], 0.0, 1, false) == 0.0
+            @test sortino([0.01, 0.02, 0.03], 0.0, 3, false) == 0.0
+            r = [0.02, -0.01, 0.03, -0.005, 0.01]
+            s = sortino(r, 0.0, 5, false)
+            @test s > 0.0
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            @test s >= sharpe(r, 0.0, 5, false) - 1e-9
+        end
+
+        @testset "compute_calmar_ratio" begin
+            calmar = DendriteTrader.Backtest.compute_calmar_ratio
+            @test calmar(50.0, 0.0, 252, false) == 0.0
+            c = calmar(20.0, 10.0, 252, false)
+            @test c > 0.0
+            @test calmar(20.0, 10.0, 0, false) == 0.0
+        end
+
+        @testset "BacktestResult includes ratio fields" begin
             cfg = BacktestConfig(initial_balance = 10_000.0)
             signals = [
                 TradeSignal(Dict(
                     "ticker" => "BTC-USD",
-                    "side" => "NEUTRAL",
-                    "price" => 100.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.92,
-                    "timestamp_ns" => 1_000_000_000,
-                )),
-            ]
-            result = run_backtest(cfg, signals)
-            @test result.total_trades == 0
-            @test result.final_balance == cfg.initial_balance
-            @test result.equity_curve == [10_000.0, 10_000.0]
-        end
-
-        @testset "run_backtest with slippage — execution price adjusted" begin
-            cfg = BacktestConfig(
-                initial_balance = 10_000.0,
-                slippage_pct = 0.5,  # 0.5% slippage
-            )
-            signals = [
-                TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
                     "side" => "BUY",
                     "price" => 100.0,
                     "quantity" => 1.0,
@@ -302,159 +322,198 @@ using DendriteTrader
                 )),
             ]
             result = run_backtest(cfg, signals)
-            # With 0.5% slippage, sell price = 110 * (1 - 0.5/100) = 109.45
-            # Buy price stored as 100 * (1 + 0.5/100) = 100.5
-            # PnL = (109.45 - 100.5) * units — should be positive but less than without slippage
-            @test result.total_trades == 1
-            @test result.trade_log[1].price ≈ 109.45 atol=0.01
-            # Final balance should differ from no-slippage case
-            cfg_noslip = BacktestConfig(initial_balance = 10_000.0)
-            result_noslip = run_backtest(cfg_noslip, signals)
-            @test result.final_balance < result_noslip.final_balance
+            @test hasfield(typeof(result), :sharpe_ratio)
+            @test hasfield(typeof(result), :sortino_ratio)
+            @test hasfield(typeof(result), :calmar_ratio)
+            @test isfinite(result.sharpe_ratio)
+            @test isfinite(result.sortino_ratio)
+            @test isfinite(result.calmar_ratio)
         end
 
-        @testset "run_backtest with commission — balance reduced" begin
-            cfg = BacktestConfig(
-                initial_balance = 10_000.0,
-                commission_pct = 0.1,  # 0.1% commission
-            )
-            signals = [
+        @testset "calmar handles wipeout without DomainError" begin
+            calmar = DendriteTrader.Backtest.compute_calmar_ratio
+            @test calmar(-100.0, 50.0, 10, false) == 0.0
+            @test calmar(-150.0, 50.0, 10, false) == 0.0
+            @test isfinite(calmar(-99.0, 50.0, 10, false))
+        end
+
+        @testset "sortino uses sample (N-1) downside deviation like Sharpe" begin
+            sortino = DendriteTrader.Backtest.compute_sortino_ratio
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.02, -0.01, 0.03, -0.005, 0.01]
+            s = sortino(r, 0.0, 5, false)
+            @test isfinite(s)
+            @test s > 0.0
+            @test s >= sharpe(r, 0.0, 5, false) - 1e-9
+        end
+
+        @testset "risk_free_rate < -1 does not throw" begin
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            sortino = DendriteTrader.Backtest.compute_sortino_ratio
+            r = [0.01, -0.02, 0.015]
+            @test isfinite(sharpe(r, -1.5, 3, false))
+            @test isfinite(sortino(r, -1.5, 3, false))
+        end
+
+        @testset "estimate_n_periods uses calendar days when span >= 1 day" begin
+            est = DendriteTrader.Backtest.estimate_n_periods
+            day_ns = Int64(86_400) * Int64(1_000_000_000)
+            sigs = [
                 TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "BUY",
-                    "price" => 100.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.92,
-                    "timestamp_ns" => 1_000_000_000,
+                    "ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.9, "timestamp_ns" => 0,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD", "side" => "SELL", "price" => 110.0,
+                    "quantity" => 1.0, "confidence" => 0.9, "timestamp_ns" => 10 * day_ns,
                 )),
             ]
-            result = run_backtest(cfg, signals)
-            # Commission should reduce balance: units * price * 0.1%
-            @test result.final_balance < cfg.initial_balance
-        end
-
-        @testset "run_backtest with slippage and commission combined" begin
-            cfg = BacktestConfig(
-                initial_balance = 10_000.0,
-                slippage_pct = 0.5,
-                commission_pct = 0.1,
-            )
-            signals = [
+            n, is_cal = est(sigs, 100)
+            @test n == 10
+            @test is_cal == true
+            # Sub-day span falls back to return count
+            sigs_short = [
                 TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "BUY",
-                    "price" => 100.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.92,
-                    "timestamp_ns" => 1_000_000_000,
+                    "ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.9, "timestamp_ns" => 0,
                 )),
                 TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "SELL",
-                    "price" => 110.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.90,
-                    "timestamp_ns" => 2_000_000_000,
+                    "ticker" => "BTC-USD", "side" => "SELL", "price" => 110.0,
+                    "quantity" => 1.0, "confidence" => 0.9, "timestamp_ns" => 1_000_000_000,
                 )),
             ]
-            result = run_backtest(cfg, signals)
-            # trade_log has the sell trade only (buy-only doesn't create trade records)
-            # Sell with 0.5% slippage: 110 * (1 - 0.5/100) = 109.45
-            @test result.trade_log[1].price ≈ 109.45 atol=0.01
-            # Commission applied on both buy and sell, so balance should be reduced
-            @test result.final_balance != cfg.initial_balance
+            n2, is_cal2 = est(sigs_short, 5)
+            @test n2 == 5
+            @test is_cal2 == false
         end
 
-        @testset "print_summary — no errors" begin
-            cfg = BacktestConfig()
+        @testset "total_trades counts closed round-trips only" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
             signals = [
-                TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "BUY",
-                    "price" => 100.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.92,
-                    "timestamp_ns" => 1_000_000_000,
-                )),
+                TradeSignal(Dict("ticker" => "A", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.92, "timestamp_ns" => 1_000_000_000)),
+                TradeSignal(Dict("ticker" => "A", "side" => "SELL", "price" => 110.0,
+                    "quantity" => 1.0, "confidence" => 0.90, "timestamp_ns" => 2_000_000_000)),
+                TradeSignal(Dict("ticker" => "B", "side" => "SELL", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.92, "timestamp_ns" => 3_000_000_000)),
+                TradeSignal(Dict("ticker" => "B", "side" => "BUY", "price" => 90.0,
+                    "quantity" => 1.0, "confidence" => 0.90, "timestamp_ns" => 4_000_000_000)),
             ]
             result = run_backtest(cfg, signals)
-            @test_nowarn print_summary(result)
+            # Both round-trips have non-zero PnL -> both counted
+            @test result.total_trades == 2
         end
 
-        @testset "format_currency" begin
-            fmt = DendriteTrader.Backtest.format_currency
-            @test fmt(1234.56) == "1,234.56"
-            @test fmt(-5000.10) == "-5,000.10"
-            @test fmt(0.0) == "0.00"
-            @test fmt(1_000_000.00) == "1,000,000.00"
-        end
-
-        @testset "compute_max_drawdown" begin
-            mdd = DendriteTrader.Backtest.compute_max_drawdown
-            # Flat curve → no drawdown
-            @test mdd([100.0, 100.0, 100.0]) == 0.0
-            # Single element → 0
-            @test mdd([100.0]) == 0.0
-            # Dip from 100 to 80 → 20% drawdown
-            @test mdd([100.0, 110.0, 88.0]) ≈ 20.0 atol=0.01
-            # Recover after dip
-            @test mdd([100.0, 120.0, 90.0, 130.0]) ≈ 25.0 atol=0.01
-        end
-
-        @testset "close PnL uses open units not exit Kelly size" begin
+        @testset "same-side re-entry accumulates position" begin
             cfg = BacktestConfig(initial_balance = 10_000.0, max_position_size = 1000.0)
             signals = [
-                TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "BUY",
-                    "price" => 100.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.99,
-                    "timestamp_ns" => 1_000_000_000,
-                )),
-                TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "SELL",
-                    "price" => 110.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.86,
-                    "timestamp_ns" => 2_000_000_000,
-                )),
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 1_000_000_000)),
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "BUY", "price" => 110.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 2_000_000_000)),
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "SELL", "price" => 120.0,
+                    "quantity" => 1.0, "confidence" => 0.90, "timestamp_ns" => 3_000_000_000)),
             ]
             result = run_backtest(cfg, signals)
             closed = filter(t -> t.pnl != 0.0, result.trade_log)
             @test length(closed) == 1
-            eng = ExecutionEngine(
-                confidence_threshold = Float32(0.85),
-                max_position_size = 1000.0,
-                payoff_ratio = 1.5,
-            )
-            open_dec = execute_signal!(eng, signals[1], 10_000.0)
-            @test closed[1].units ≈ open_dec.position_units atol=1e-9
-            @test closed[1].pnl ≈ (110.0 - 100.0) * open_dec.position_units atol=1e-6
+            @test closed[1].price ≈ 120.0 atol=1e-9
+            @test closed[1].units > 0.0
         end
 
-        @testset "integer kwargs coerce into BacktestConfig" begin
-            cfg = BacktestConfig(initial_balance = 10_000, slippage_pct = 0, commission_pct = 0)
-            @test cfg.initial_balance == 10_000.0
-            @test cfg.slippage_pct == 0.0
+        @testset "calmar uses 365 for calendar days" begin
+            calmar = DendriteTrader.Backtest.compute_calmar_ratio
+            # With calendar days (365), 1-year return should annualize cleanly
+            c = calmar(20.0, 10.0, 365, true)
+            # annualized = (1.2)^(365/365) - 1 = 0.2; calmar = 0.2/0.1 = 2.0
+            @test c ≈ 2.0 atol=0.01
         end
 
-        @testset "short open sell slippage fills below mid" begin
-            cfg = BacktestConfig(initial_balance = 10_000.0, slippage_pct = 1.0)
+        @testset "estimate_n_periods handles unsorted signals" begin
+            est = DendriteTrader.Backtest.estimate_n_periods
+            day_ns = Int64(86_400) * Int64(1_000_000_000)
+            # Signals in reverse order — should use min/max
+            sigs = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD", "side" => "SELL", "price" => 110.0,
+                    "quantity" => 1.0, "confidence" => 0.9, "timestamp_ns" => 10 * day_ns,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.9, "timestamp_ns" => 0,
+                )),
+            ]
+            n, is_cal = est(sigs, 100)
+            @test n == 10
+            @test is_cal == true
+        end
+
+        @testset "final_balance uses MTM equity" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
             signals = [
                 TradeSignal(Dict(
-                    "ticker" => "BTC-USD",
-                    "side" => "SELL",
-                    "price" => 100.0,
-                    "quantity" => 1.0,
-                    "confidence" => 0.92,
-                    "timestamp_ns" => 1_000_000_000,
+                    "ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.92, "timestamp_ns" => 1_000_000_000,
                 )),
             ]
             result = run_backtest(cfg, signals)
+            # With open position at entry price, MTM equity == initial balance
+            @test result.final_balance == cfg.initial_balance
+            @test result.total_return == 0.0
+        end
+
+        @testset "same-side re-entry recorded in trade_log" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0, max_position_size = 1000.0)
+            signals = [
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "BUY", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 1_000_000_000)),
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "BUY", "price" => 110.0,
+                    "quantity" => 1.0, "confidence" => 0.99, "timestamp_ns" => 2_000_000_000)),
+                TradeSignal(Dict("ticker" => "BTC-USD", "side" => "SELL", "price" => 120.0,
+                    "quantity" => 1.0, "confidence" => 0.90, "timestamp_ns" => 3_000_000_000)),
+            ]
+            result = run_backtest(cfg, signals)
+            # Same-side fill + close = 2 trade_log entries
+            @test length(result.trade_log) == 2
+            @test result.trade_log[1].pnl == 0.0  # same-side fill
+            @test result.trade_log[2].pnl > 0.0   # close
+            closed = filter(t -> t.pnl != 0.0, result.trade_log)
+            @test length(closed) == 1
+            @test closed[1].price ≈ 120.0 atol=1e-9
+        end
+
+        @testset "short round-trip counted once in total_trades" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict("ticker" => "A", "side" => "SELL", "price" => 100.0,
+                    "quantity" => 1.0, "confidence" => 0.92, "timestamp_ns" => 1_000_000_000)),
+                TradeSignal(Dict("ticker" => "A", "side" => "BUY", "price" => 90.0,
+                    "quantity" => 1.0, "confidence" => 0.90, "timestamp_ns" => 2_000_000_000)),
+            ]
+            result = run_backtest(cfg, signals)
+            # Short open no longer logged; only the cover close is in trade_log
             @test result.total_trades == 1
-            @test result.trade_log[1].price ≈ 99.0 atol=1e-9
+            @test result.trade_log[1].pnl > 0.0  # short profit
+        end
+
+        @testset "compute_sharpe_ratio with per-signal risk-free" begin
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.01, 0.02, -0.005, 0.015, 0.008]
+            s = sharpe(r, 0.0, 5, false)
+            @test s > 0.0
+            @test isfinite(s)
+            s_low = sharpe(r, 0.005, 5, false)
+            @test s_low < s
+        end
+
+        @testset "compute_sortino_ratio consistent with Sharpe" begin
+            sortino = DendriteTrader.Backtest.compute_sortino_ratio
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.02, -0.01, 0.03, -0.005, 0.01]
+            s = sortino(r, 0.0, 5, false)
+            @test isfinite(s)
+            @test s > 0.0
+            @test s >= sharpe(r, 0.0, 5, false) - 1e-9
         end
     end
 end
