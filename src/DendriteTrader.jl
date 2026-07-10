@@ -888,7 +888,6 @@ function start!(
                     err = validate_signal(data)
                     if err !== nothing
                         @warn "[execution] Invalid signal: $err"
-                        received_ok = true
                         continue
                     end
 
@@ -953,9 +952,12 @@ function start!(
         end
 
         @info "[execution] Reconnecting in $(reconnect_interval_s)s (attempt $reconnect_count)..."
-        # Sleep in small chunks so stop!() can take effect promptly
+        # Sleep in small chunks so stop!() or timeout can take effect promptly
         elapsed = 0.0
         while elapsed < reconnect_interval_s && !engine.should_stop[]
+            if timeout_s !== nothing && (time() - start_time) >= timeout_s
+                break
+            end
             sleep(min(0.5, reconnect_interval_s - elapsed))
             elapsed += 0.5
         end
