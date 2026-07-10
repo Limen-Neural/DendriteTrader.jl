@@ -900,7 +900,7 @@ function start!(
                     if e isa ZMQ.TimeoutError
                         # recv timeout, loop back to check should_stop
                         continue
-                    elseif e isa ZMQ.StateError || e isa ZMQ.ZMQError
+                    elseif e isa ZMQ.StateError
                         @warn "[execution] ZMQ transport error, reconnecting: $e"
                         break  # break inner loop to reconnect
                     else
