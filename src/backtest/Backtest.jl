@@ -175,6 +175,14 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     positions = Dict{String, OpenPosition}()
 
     for signal in signals
+        # Skip same-side re-entry before invoking the engine so that no executed
+        # event is recorded for a fill that leaves the ledger unchanged.
+        existing = get(positions, signal.ticker, nothing)
+        if existing !== nothing && existing.side == signal.side
+            push!(equity_curve, balance)
+            continue
+        end
+
         decision = execute_signal!(engine, signal, balance)
 
         if decision.executed
@@ -213,10 +221,6 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                         pnl,
                     ),
                 )
-            elseif open_pos !== nothing && open_pos.side == signal.side
-                # Same-side re-entry: do not overwrite / drop the open position
-                # (would leak open commission and never realize prior PnL)
-                nothing
             else
                 units = decision.position_units
                 commission = units * execution_price * (config.commission_pct / 100.0)
