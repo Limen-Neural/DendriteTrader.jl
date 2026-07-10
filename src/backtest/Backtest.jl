@@ -130,7 +130,7 @@ end
 """
     OpenPosition
 
-Open position state: entry price, opened units, and side (long/short).
+Open position state: entry price, opened units, side (long/short), and entry commission.
 """
 struct OpenPosition
     entry_price::Float64
