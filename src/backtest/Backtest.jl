@@ -45,6 +45,7 @@ Configuration for backtest runs.
 - `max_position_size`: hard cap on position units (default 10.0)
 - `slippage_pct`: slippage percentage per trade (default 0.0)
 - `commission_pct`: commission percentage per trade (default 0.0)
+- `risk_free_rate`: annualized risk-free rate for Sharpe/Sortino (default 0.0)
 """
 struct BacktestConfig
     initial_balance::Float64
@@ -53,6 +54,7 @@ struct BacktestConfig
     max_position_size::Float64
     slippage_pct::Float64
     commission_pct::Float64
+    risk_free_rate::Float64
 end
 
 function BacktestConfig(;
@@ -62,6 +64,7 @@ function BacktestConfig(;
     max_position_size = 10.0,
     slippage_pct = 0.0,
     commission_pct = 0.0,
+    risk_free_rate = 0.0,
 )
     BacktestConfig(
         Float64(initial_balance),
@@ -70,6 +73,7 @@ function BacktestConfig(;
         Float64(max_position_size),
         Float64(slippage_pct),
         Float64(commission_pct),
+        Float64(risk_free_rate),
     )
 end
 
@@ -220,33 +224,6 @@ function estimate_n_periods(signals::Vector{TradeSignal}, n_returns::Int)::Tuple
 end
 
 """
-    OpenPosition
-
-Open position state: entry price, opened units, side (long/short), and entry commission.
-"""
-struct OpenPosition
-    entry_price::Float64
-    units::Float64
-    side::TradeSide
-    entry_commission::Float64
-end
-
-"""
-    apply_slippage(price, side, slippage_pct) -> Float64
-
-Adverse market-order slippage: buys fill higher, sells fill lower.
-"""
-function apply_slippage(price::Float64, side::TradeSide, slippage_pct::Float64)
-    if side == Buy
-        return price * (1.0 + slippage_pct / 100.0)
-    elseif side == Sell
-        return price * (1.0 - slippage_pct / 100.0)
-    else
-        return price
-    end
-end
-
-"""
     run_backtest(config, signals) -> BacktestResult
 
 Replay signals through the ExecutionEngine and compute performance metrics.
@@ -303,24 +280,28 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 balance += gross_pnl
                 delete!(positions, signal.ticker)
 
-                push!(
-                    trade_log,
-                    TradeRecord(
-                        signal.ticker,
-                        string(signal.side),
-                        signal.timestamp_ns,
-                        execution_price,
-                        entry_units,
-                        decision.kelly_fraction,
-                        pnl,
-                    ),
+                close_rec = TradeRecord(
+                    signal.ticker,
+                    string(signal.side),
+                    signal.timestamp_ns,
+                    execution_price,
+                    entry_units,
+                    decision.kelly_fraction,
+                    pnl,
                 )
+                push!(trade_log, close_rec)
+                push!(closed_trades, close_rec)
             else
                 units = decision.position_units
                 commission = units * execution_price * (config.commission_pct / 100.0)
                 balance -= commission
-                positions[signal.ticker] =
-                    OpenPosition(execution_price, units, signal.side, commission)
+                positions[signal.ticker] = OpenPosition(
+                    execution_price,
+                    units,
+                    signal.side,
+                    commission,
+                    execution_price,
+                )
 
                 # Long opens are silent until close; short opens logged with pnl=0
                 if signal.side == Sell
@@ -385,7 +366,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
         total_return,
         max_dd,
         wr,
-        length(closed_trades),
+        length(trade_log),
         sr,
         sortino,
         calmar,
