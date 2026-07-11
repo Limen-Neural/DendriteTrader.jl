@@ -23,6 +23,97 @@ using DendriteTrader
         @test !passes_gate(s, 0.95f0)
     end
 
+    @testset "validate_signal" begin
+        # Helper: valid signal dict
+        valid = Dict(
+            "ticker" => "MARKET-A",
+            "side" => "BUY",
+            "price" => 100.0,
+            "quantity" => 1.0,
+            "confidence" => 0.9,
+            "timestamp_ns" => 1_000,
+        )
+
+        # Valid signal returns nothing
+        @test validate_signal(valid) === nothing
+
+        # Zero timestamp is rejected (must be > 0 per contract)
+        zero_ts = copy(valid); zero_ts["timestamp_ns"] = 0
+        @test occursin("timestamp", validate_signal(zero_ts))
+
+        # Missing each required field returns error
+        for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
+            d = copy(valid)
+            delete!(d, field)
+            @test validate_signal(d) isa String
+            @test occursin(field, validate_signal(d))
+        end
+
+        # Empty ticker returns error
+        empty_ticker = copy(valid); empty_ticker["ticker"] = ""
+        @test occursin("ticker", validate_signal(empty_ticker))
+
+        # Invalid side returns error
+        for bad_side in ("hold", "Buy", "", "BUY SELL")
+            d = copy(valid); d["side"] = bad_side
+            r = validate_signal(d)
+            @test r isa String
+            @test occursin("side", r)
+        end
+
+        # Negative price returns error
+        neg_price = copy(valid); neg_price["price"] = -1.0
+        @test occursin("price", validate_signal(neg_price))
+
+        # Zero price returns error
+        zero_price = copy(valid); zero_price["price"] = 0.0
+        @test occursin("price", validate_signal(zero_price))
+
+        # Confidence out of range returns error
+        for bad_conf in (-0.1, 1.1, -1.0, 2.0)
+            d = copy(valid); d["confidence"] = bad_conf
+            @test occursin("confidence", validate_signal(d))
+        end
+
+        # Boundary confidence values are accepted
+        for edge_conf in (0.0, 1.0)
+            d = copy(valid); d["confidence"] = edge_conf
+            @test validate_signal(d) === nothing
+        end
+
+        # Bool rejected for price
+        bool_price = copy(valid); bool_price["price"] = true
+        @test occursin("number", validate_signal(bool_price))
+
+        # Bool rejected for confidence
+        bool_conf = copy(valid); bool_conf["confidence"] = false
+        @test occursin("number", validate_signal(bool_conf))
+
+        # Bool rejected for timestamp
+        bool_ts = copy(valid); bool_ts["timestamp_ns"] = true
+        @test occursin("integer", validate_signal(bool_ts))
+
+        # NaN rejected for price
+        nan_price = copy(valid); nan_price["price"] = NaN
+        @test occursin("finite", validate_signal(nan_price))
+
+        # Inf rejected for price
+        inf_price = copy(valid); inf_price["price"] = Inf
+        @test occursin("finite", validate_signal(inf_price))
+
+        # NaN rejected for confidence
+        nan_conf = copy(valid); nan_conf["confidence"] = NaN
+        @test occursin("finite", validate_signal(nan_conf))
+
+        # Inf rejected for confidence
+        inf_conf = copy(valid); inf_conf["confidence"] = Inf
+        @test occursin("finite", validate_signal(inf_conf))
+
+        # Negative timestamp returns error
+        neg_ts = copy(valid); neg_ts["timestamp_ns"] = -1
+        @test occursin("timestamp", validate_signal(neg_ts))
+    end
+
     @testset "ExecutionEngine — confidence gate" begin
         engine = ExecutionEngine(confidence_threshold = 0.85f0)
 
@@ -689,7 +780,7 @@ end
         "price" => 50_000.0,
         "quantity" => 0.1,
         "confidence" => 0.92,
-        "timestamp_ns" => 0,
+        "timestamp_ns" => 1_000_000_000,
     ))
 
     # Resend until both trade messages are observed (or deadline)
