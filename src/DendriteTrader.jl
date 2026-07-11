@@ -665,6 +665,9 @@ function get_cached(cache::PriceCache, ticker::String)
             if (time() - cache.times[ticker]) < cache.ttl_s
                 return cache.prices[ticker]
             end
+            # Lazy eviction: drop stale entries so cache_size stays accurate
+            delete!(cache.prices, ticker)
+            delete!(cache.times, ticker)
         end
         return nothing
     end
