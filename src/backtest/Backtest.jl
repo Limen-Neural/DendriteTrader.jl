@@ -78,18 +78,35 @@ function BacktestConfig(;
 end
 
 """
+    OpenPosition
+
+Internal open position tracked by the backtest engine.
+
+# Fields
+- `entry_price`: price at which the position was opened
+- `units`: position size from the opening decision
+- `is_long`: `true` for long, `false` for short
+"""
+struct OpenPosition
+    entry_price::Float64
+    units::Float64
+    is_long::Bool
+end
+
+"""
     TradeRecord
 
 Record of a single trade in the backtest.
 
 # Fields
 - `ticker`: market symbol
-- `side`: BUY or SELL
+- `side`: BUY or SELL (closing side for closed trades)
 - `entry_time`: signal timestamp (ns)
 - `price`: execution price
-- `units`: position size
-- `kelly_fraction`: Kelly fraction used
-- `pnl`: realized PnL (0.0 until closed)
+- `units`: position size (entry units for closed trades)
+- `kelly_fraction`: Kelly fraction used on the closing signal
+- `pnl`: realized PnL (meaningful when `is_closed`)
+- `is_closed`: whether this record is a closed (round-trip) trade
 """
 struct TradeRecord
     ticker::String
@@ -99,6 +116,7 @@ struct TradeRecord
     units::Float64
     kelly_fraction::Float64
     pnl::Float64
+    is_closed::Bool
 end
 
 """
@@ -227,9 +245,14 @@ end
     run_backtest(config, signals) -> BacktestResult
 
 Replay signals through the ExecutionEngine and compute performance metrics.
-Applies slippage and commission when configured.
 
-Close PnL always uses the units stored at open (not the exit signal's Kelly size).
+# Position model
+- Positions are tracked as `(entry_price, entry_units, is_long)`.
+- A closing signal fully closes the open position using the **entry** units
+  (all-or-nothing; partial cover / flip is not supported).
+- Open positions remaining at the end of the signal stream are **not**
+  marked-to-market; metrics reflect closed round-trips only.
+- A second same-side signal while already open is ignored (first entry kept).
 """
 function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::BacktestResult
     engine = ExecutionEngine(
@@ -390,9 +413,12 @@ function compute_max_drawdown(equity::Vector{Float64})
         if val > peak
             peak = val
         end
-        dd = (peak - val) / peak * 100.0
-        if dd > max_dd
-            max_dd = dd
+        # Avoid division by zero / NaN when the peak is non-positive
+        if peak > 0.0
+            dd = (peak - val) / peak * 100.0
+            if dd > max_dd
+                max_dd = dd
+            end
         end
     end
 
@@ -552,6 +578,9 @@ end
 Format a number as currency with commas.
 """
 function format_currency(val::Float64)
+    if !isfinite(val)
+        return string(val)
+    end
     sign = val < 0 ? "-" : ""
     s = @sprintf("%.2f", abs(val))
     int_part, dec_part = split(s, ".")
@@ -648,6 +677,7 @@ function export_trade_log_json(result::BacktestResult, path::String)
             "units" => t.units,
             "kelly_fraction" => t.kelly_fraction,
             "pnl" => t.pnl,
+            "is_closed" => t.is_closed,
         ) for t in result.trade_log
     ]
 
