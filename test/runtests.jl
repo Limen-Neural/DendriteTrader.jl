@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 using Test
+using JSON
+using ZMQ
 using DendriteTrader
 
 @testset "DendriteTrader" begin
@@ -175,6 +177,115 @@ using DendriteTrader
         @test !zero_dec.executed
         @test zero_dec.reason == "zero-sized position"
     end
+end
+
+
+@testset "strip_zmq_topic handles ASCII and multi-byte UTF-8" begin
+    strip = DendriteTrader.strip_zmq_topic
+    @test strip("trade.{\"a\":1}", "trade.") == "{\"a\":1}"
+    # Multi-byte prefix: "éa" is 3 bytes (é=2, a=1), 2 chars
+    topic = "éa"
+    payload = "{\"x\":1}"
+    msg = topic * payload
+    @test startswith(msg, topic)
+    @test strip(msg, topic) == payload
+    @test strip("no-prefix", "trade.") == "no-prefix"
+    @test strip("trade.", "trade.") == ""
+end
+
+@testset "ZMQ topic filtering" begin
+    endpoint = "ipc:///tmp/dendrite-test-topic-$(getpid())-$(time_ns()).ipc"
+    ctx = ZMQ.Context()
+    pub = ZMQ.Socket(ctx, ZMQ.PUB)
+    ZMQ.bind(pub, endpoint)
+    sleep(0.1)
+
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        zmq_topic = "trade.",
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 5.0,
+    )
+    # Allow SUB to connect and subscription to propagate (slow joiner)
+    sleep(0.5)
+
+    signal_json = JSON.json(Dict(
+        "ticker" => "BTC-USD",
+        "side" => "BUY",
+        "price" => 50_000.0,
+        "quantity" => 0.1,
+        "confidence" => 0.92,
+        "timestamp_ns" => 0,
+    ))
+
+    # Resend until both trade messages are observed (or deadline)
+    deadline = time() + 4.0
+    while length(decisions) < 2 && time() < deadline
+        ZMQ.send(pub, "trade." * signal_json)
+        ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
+        ZMQ.send(pub, "trade." * signal_json)
+        sleep(0.2)
+    end
+
+    stop!(engine)
+    wait(t)
+
+    @test length(decisions) >= 2
+    @test all(d -> d.signal.ticker == "BTC-USD", decisions)
+
+    ZMQ.close(pub)
+    ZMQ.close(ctx)
+    rm(endpoint, force = true)
+end
+
+@testset "ZMQ reconnection honors max_reconnect_attempts" begin
+    # Invalid endpoint causes connect to throw StateError; each outer-loop pass
+    # counts toward max_reconnect_attempts (counter is not reset without recv).
+    endpoint = "not-valid"
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t0 = time()
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 10.0,
+        reconnect_interval_s = 0.05,
+        max_reconnect_attempts = 3,
+    )
+    wait(t)
+    elapsed = time() - t0
+
+    @test isempty(decisions)
+    # Should exit via max attempts well before the 10s timeout
+    @test elapsed < 5.0
+end
+
+@testset "ZMQ timeout exit without peer" begin
+    endpoint = "ipc:///tmp/dendrite-test-timeout-$(getpid())-$(time_ns()).ipc"
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 1.5,
+        reconnect_interval_s = 0.1,
+        max_reconnect_attempts = 0,  # unlimited; timeout should still stop
+    )
+    wait(t)
+
+    @test isempty(decisions)
+    rm(endpoint, force = true)
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
