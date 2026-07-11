@@ -75,7 +75,7 @@ export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDec
 export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
 export RateLimiter, acquire!, set_rate!
-export PriceCache, invalidate!, clear!, cache_size
+export PriceCache, invalidate!, clear!, cache_size, get_cached, put_cached!, is_fresh
 export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
