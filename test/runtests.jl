@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 using Test
+using JSON
+using ZMQ
 using DendriteTrader
 
 @testset "DendriteTrader" begin
@@ -21,10 +23,101 @@ using DendriteTrader
         @test !passes_gate(s, 0.95f0)
     end
 
+    @testset "validate_signal" begin
+        # Helper: valid signal dict
+        valid = Dict(
+            "ticker" => "MARKET-A",
+            "side" => "BUY",
+            "price" => 100.0,
+            "quantity" => 1.0,
+            "confidence" => 0.9,
+            "timestamp_ns" => 1_000,
+        )
+
+        # Valid signal returns nothing
+        @test validate_signal(valid) === nothing
+
+        # Zero timestamp is rejected (must be > 0 per contract)
+        zero_ts = copy(valid); zero_ts["timestamp_ns"] = 0
+        @test occursin("timestamp", validate_signal(zero_ts))
+
+        # Missing each required field returns error
+        for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
+            d = copy(valid)
+            delete!(d, field)
+            @test validate_signal(d) isa String
+            @test occursin(field, validate_signal(d))
+        end
+
+        # Empty ticker returns error
+        empty_ticker = copy(valid); empty_ticker["ticker"] = ""
+        @test occursin("ticker", validate_signal(empty_ticker))
+
+        # Invalid side returns error
+        for bad_side in ("hold", "Buy", "", "BUY SELL")
+            d = copy(valid); d["side"] = bad_side
+            r = validate_signal(d)
+            @test r isa String
+            @test occursin("side", r)
+        end
+
+        # Negative price returns error
+        neg_price = copy(valid); neg_price["price"] = -1.0
+        @test occursin("price", validate_signal(neg_price))
+
+        # Zero price returns error
+        zero_price = copy(valid); zero_price["price"] = 0.0
+        @test occursin("price", validate_signal(zero_price))
+
+        # Confidence out of range returns error
+        for bad_conf in (-0.1, 1.1, -1.0, 2.0)
+            d = copy(valid); d["confidence"] = bad_conf
+            @test occursin("confidence", validate_signal(d))
+        end
+
+        # Boundary confidence values are accepted
+        for edge_conf in (0.0, 1.0)
+            d = copy(valid); d["confidence"] = edge_conf
+            @test validate_signal(d) === nothing
+        end
+
+        # Bool rejected for price
+        bool_price = copy(valid); bool_price["price"] = true
+        @test occursin("number", validate_signal(bool_price))
+
+        # Bool rejected for confidence
+        bool_conf = copy(valid); bool_conf["confidence"] = false
+        @test occursin("number", validate_signal(bool_conf))
+
+        # Bool rejected for timestamp
+        bool_ts = copy(valid); bool_ts["timestamp_ns"] = true
+        @test occursin("integer", validate_signal(bool_ts))
+
+        # NaN rejected for price
+        nan_price = copy(valid); nan_price["price"] = NaN
+        @test occursin("finite", validate_signal(nan_price))
+
+        # Inf rejected for price
+        inf_price = copy(valid); inf_price["price"] = Inf
+        @test occursin("finite", validate_signal(inf_price))
+
+        # NaN rejected for confidence
+        nan_conf = copy(valid); nan_conf["confidence"] = NaN
+        @test occursin("finite", validate_signal(nan_conf))
+
+        # Inf rejected for confidence
+        inf_conf = copy(valid); inf_conf["confidence"] = Inf
+        @test occursin("finite", validate_signal(inf_conf))
+
+        # Negative timestamp returns error
+        neg_ts = copy(valid); neg_ts["timestamp_ns"] = -1
+        @test occursin("timestamp", validate_signal(neg_ts))
+    end
+
     @testset "ExecutionEngine — confidence gate" begin
         engine = ExecutionEngine(confidence_threshold = 0.85f0)
 
-        # Signal above threshold → executed
+        # Signal above threshold -> executed
         sig_hi = TradeSignal(
             Dict(
                 "ticker"=>"MARKET-B",
@@ -41,7 +134,7 @@ using DendriteTrader
         @test dec.kelly_fraction > 0.0
         @test dec.applied_fraction > 0.0
 
-        # Signal below threshold → rejected
+        # Signal below threshold -> rejected
         sig_lo = TradeSignal(
             Dict(
                 "ticker"=>"MARKET-B",
@@ -270,6 +363,498 @@ using DendriteTrader
             @test cache_size(cache) == 2
         end
     end
+    @testset "Sell and Neutral signals" begin
+        @testset "Sell signal on existing position decrements position" begin
+            engine = ExecutionEngine()
+            buy = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-E",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec_buy = execute_signal!(engine, buy, 10_000.0)
+            @test dec_buy.executed
+            pos_after_buy = engine.positions["MARKET-E"]
+            @test pos_after_buy > 0.0
+
+            sell = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-E",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec_sell = execute_signal!(engine, sell, 10_000.0)
+            @test dec_sell.executed
+            @test engine.positions["MARKET-E"] < pos_after_buy
+        end
+
+        @testset "Sell signal on empty position clamped to 0" begin
+            engine = ExecutionEngine()
+            sell = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-F",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec = execute_signal!(engine, sell, 10_000.0)
+            @test dec.executed
+            @test engine.positions["MARKET-F"] == 0.0
+        end
+
+        @testset "Neutral signal rejected with 'neutral signal' reason" begin
+            engine = ExecutionEngine()
+            neutral = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-G",
+                    "side"=>"NEUTRAL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec = execute_signal!(engine, neutral, 10_000.0)
+            @test !dec.executed
+            @test dec.reason == "neutral signal"
+        end
+
+        @testset "Buy then Sell — position goes to zero" begin
+            engine = ExecutionEngine()
+            buy = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-H",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, buy, 10_000.0)
+            @test engine.positions["MARKET-H"] > 0.0
+
+            sell = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-H",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, sell, 10_000.0)
+            @test engine.positions["MARKET-H"] == 0.0
+        end
+
+        @testset "Multiple Buy then Sell — correct netting" begin
+            engine = ExecutionEngine()
+            buy_sig = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-I",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, buy_sig, 10_000.0)
+            execute_signal!(engine, buy_sig, 10_000.0)
+            pos_after_two_buys = engine.positions["MARKET-I"]
+
+            sell_sig = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-I",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, sell_sig, 10_000.0)
+            # Default max_position_size=10; two capped buys then one sell → exactly 10.0
+            @test engine.positions["MARKET-I"] == 10.0
+            @test engine.positions["MARKET-I"] < pos_after_two_buys
+        end
+    end
+    @testset "Backtest" begin
+        @testset "BacktestConfig constructor with defaults" begin
+            cfg = BacktestConfig()
+            @test cfg.initial_balance == 10_000.0
+            @test cfg.confidence_threshold == Float32(0.85)
+            @test cfg.payoff_ratio == 1.5
+            @test cfg.max_position_size == 10.0
+            @test cfg.slippage_pct == 0.0
+            @test cfg.commission_pct == 0.0
+        end
+
+        @testset "BacktestConfig constructor with custom values" begin
+            cfg = BacktestConfig(
+                initial_balance = 50_000.0,
+                confidence_threshold = Float32(0.90),
+                payoff_ratio = 2.0,
+                max_position_size = 20.0,
+                slippage_pct = 0.05,
+                commission_pct = 0.1,
+            )
+            @test cfg.initial_balance == 50_000.0
+            @test cfg.confidence_threshold == Float32(0.90)
+            @test cfg.payoff_ratio == 2.0
+            @test cfg.max_position_size == 20.0
+            @test cfg.slippage_pct == 0.05
+            @test cfg.commission_pct == 0.1
+        end
+
+        @testset "run_backtest with buy signals — equity curve changes" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "ETH-USD",
+                    "side" => "BUY",
+                    "price" => 50.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test length(result.equity_curve) == 3  # initial + 2 signals
+            @test result.equity_curve[1] == 10_000.0
+            # Buy-only: no trades recorded until a sell closes the position
+            @test result.total_trades == 0
+            @test result.final_balance == cfg.initial_balance
+        end
+
+        @testset "run_backtest with buy+sell — PnL computed" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 110.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.final_balance != cfg.initial_balance
+            @test result.total_return != 0.0
+            closed = filter(t -> t.pnl != 0.0, result.trade_log)
+            @test length(closed) >= 1
+            @test closed[1].pnl > 0.0  # bought at 100, sold at 110
+        end
+
+        @testset "run_backtest with neutral signals — no trades" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "NEUTRAL",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.total_trades == 0
+            @test result.final_balance == cfg.initial_balance
+            @test result.equity_curve == [10_000.0, 10_000.0]
+        end
+
+        @testset "run_backtest with slippage — execution price adjusted" begin
+            cfg = BacktestConfig(
+                initial_balance = 10_000.0,
+                slippage_pct = 0.5,  # 0.5% slippage
+            )
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 110.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            # With 0.5% slippage, sell price = 110 * (1 - 0.5/100) = 109.45
+            # Buy price stored as 100 * (1 + 0.5/100) = 100.5
+            # PnL = (109.45 - 100.5) * units — should be positive but less than without slippage
+            @test result.total_trades == 1
+            @test result.trade_log[1].price ≈ 109.45 atol=0.01
+            # Final balance should differ from no-slippage case
+            cfg_noslip = BacktestConfig(initial_balance = 10_000.0)
+            result_noslip = run_backtest(cfg_noslip, signals)
+            @test result.final_balance < result_noslip.final_balance
+        end
+
+        @testset "run_backtest with commission — balance reduced" begin
+            cfg = BacktestConfig(
+                initial_balance = 10_000.0,
+                commission_pct = 0.1,  # 0.1% commission
+            )
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            # Commission should reduce balance: units * price * 0.1%
+            @test result.final_balance < cfg.initial_balance
+        end
+
+        @testset "run_backtest with slippage and commission combined" begin
+            cfg = BacktestConfig(
+                initial_balance = 10_000.0,
+                slippage_pct = 0.5,
+                commission_pct = 0.1,
+            )
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 110.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.90,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            # trade_log has the sell trade only (buy-only doesn't create trade records)
+            # Sell with 0.5% slippage: 110 * (1 - 0.5/100) = 109.45
+            @test result.trade_log[1].price ≈ 109.45 atol=0.01
+            # Commission applied on both buy and sell, so balance should be reduced
+            @test result.final_balance != cfg.initial_balance
+        end
+
+        @testset "print_summary — no errors" begin
+            cfg = BacktestConfig()
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test_nowarn print_summary(result)
+        end
+
+        @testset "format_currency" begin
+            fmt = DendriteTrader.Backtest.format_currency
+            @test fmt(1234.56) == "1,234.56"
+            @test fmt(-5000.10) == "-5,000.10"
+            @test fmt(0.0) == "0.00"
+            @test fmt(1_000_000.00) == "1,000,000.00"
+        end
+
+        @testset "compute_max_drawdown" begin
+            mdd = DendriteTrader.Backtest.compute_max_drawdown
+            # Flat curve → no drawdown
+            @test mdd([100.0, 100.0, 100.0]) == 0.0
+            # Single element → 0
+            @test mdd([100.0]) == 0.0
+            # Dip from 100 to 80 → 20% drawdown
+            @test mdd([100.0, 110.0, 88.0]) ≈ 20.0 atol=0.01
+            # Recover after dip
+            @test mdd([100.0, 120.0, 90.0, 130.0]) ≈ 25.0 atol=0.01
+        end
+
+        @testset "close PnL uses open units not exit Kelly size" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0, max_position_size = 1000.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "BUY",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.99,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 110.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.86,
+                    "timestamp_ns" => 2_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            closed = filter(t -> t.pnl != 0.0, result.trade_log)
+            @test length(closed) == 1
+            eng = ExecutionEngine(
+                confidence_threshold = Float32(0.85),
+                max_position_size = 1000.0,
+                payoff_ratio = 1.5,
+            )
+            open_dec = execute_signal!(eng, signals[1], 10_000.0)
+            @test closed[1].units ≈ open_dec.position_units atol=1e-9
+            @test closed[1].pnl ≈ (110.0 - 100.0) * open_dec.position_units atol=1e-6
+        end
+
+        @testset "integer kwargs coerce into BacktestConfig" begin
+            cfg = BacktestConfig(initial_balance = 10_000, slippage_pct = 0, commission_pct = 0)
+            @test cfg.initial_balance == 10_000.0
+            @test cfg.slippage_pct == 0.0
+        end
+
+        @testset "short open sell slippage fills below mid" begin
+            cfg = BacktestConfig(initial_balance = 10_000.0, slippage_pct = 1.0)
+            signals = [
+                TradeSignal(Dict(
+                    "ticker" => "BTC-USD",
+                    "side" => "SELL",
+                    "price" => 100.0,
+                    "quantity" => 1.0,
+                    "confidence" => 0.92,
+                    "timestamp_ns" => 1_000_000_000,
+                )),
+            ]
+            result = run_backtest(cfg, signals)
+            @test result.total_trades == 1
+            @test result.trade_log[1].price ≈ 99.0 atol=1e-9
+        end
+
+        @testset "compute_sharpe_ratio with per-signal risk-free" begin
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.01, 0.02, -0.005, 0.015, 0.008]
+            s = sharpe(r, 0.0, 5, false)
+            @test s > 0.0
+            @test isfinite(s)
+            s_low = sharpe(r, 0.005, 5, false)
+            @test s_low < s
+        end
+
+        @testset "compute_sortino_ratio consistent with Sharpe" begin
+            sortino = DendriteTrader.Backtest.compute_sortino_ratio
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.02, -0.01, 0.03, -0.005, 0.01]
+            s = sortino(r, 0.0, 5, false)
+            @test isfinite(s)
+            @test s > 0.0
+            @test s >= sharpe(r, 0.0, 5, false) - 1e-9
+        end
+    end
+end
+
+
+@testset "strip_zmq_topic handles ASCII and multi-byte UTF-8" begin
+    strip = DendriteTrader.strip_zmq_topic
+    @test strip("trade.{\"a\":1}", "trade.") == "{\"a\":1}"
+    # Multi-byte prefix: "éa" is 3 bytes (é=2, a=1), 2 chars
+    topic = "éa"
+    payload = "{\"x\":1}"
+    msg = topic * payload
+    @test startswith(msg, topic)
+    @test strip(msg, topic) == payload
+    @test strip("no-prefix", "trade.") == "no-prefix"
+    @test strip("trade.", "trade.") == ""
+end
+
+@testset "ZMQ topic filtering" begin
+    endpoint = "ipc:///tmp/dendrite-test-topic-$(getpid())-$(time_ns()).ipc"
+    ctx = ZMQ.Context()
+    pub = ZMQ.Socket(ctx, ZMQ.PUB)
+    ZMQ.bind(pub, endpoint)
+    sleep(0.1)
+
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        zmq_topic = "trade.",
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 5.0,
+    )
+    # Allow SUB to connect and subscription to propagate (slow joiner)
+    sleep(0.5)
+
+    signal_json = JSON.json(Dict(
+        "ticker" => "BTC-USD",
+        "side" => "BUY",
+        "price" => 50_000.0,
+        "quantity" => 0.1,
+        "confidence" => 0.92,
+        "timestamp_ns" => 1_000_000_000,
+    ))
+
+    # Heartbeat should be filtered out by topic subscription
+    ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
+
+    # Resend until both trade messages are observed (or deadline)
+    deadline = time() + 4.0
+    while length(decisions) < 2 && time() < deadline
+        ZMQ.send(pub, "trade." * signal_json)
+        sleep(0.2)
+    end
+
+    # Assert topic filtering: both trade.* messages processed, heartbeat.* ignored
+    @test length(decisions) == 2
+
+    stop!(engine)
+    wait(t)
+    close(pub)
+    close(ctx)
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
