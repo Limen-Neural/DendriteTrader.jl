@@ -311,9 +311,6 @@ export_trade_log_json(result, "output/trades.json")
 | `equity_curve` | `Vector{Float64}` | Balance after each signal |
 | `trade_log` | `Vector{TradeRecord}` | All executed trades with PnL |
 | `events` | `Vector{SignalEvent}` | Raw engine events |
-| `sharpe_ratio` | `Float64` | Annualized Sharpe ratio |
-| `sortino_ratio` | `Float64` | Annualized Sortino ratio |
-| `calmar_ratio` | `Float64` | Calmar ratio (annualized return / max drawdown) |
 
 ## Signal Format
 

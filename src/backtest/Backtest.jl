@@ -43,18 +43,18 @@ Configuration for backtest runs.
 - `confidence_threshold`: minimum signal confidence to execute (default 0.85)
 - `payoff_ratio`: odds-style average win/loss ratio for Kelly sizing (default 1.5)
 - `max_position_size`: hard cap on position units (default 10.0)
-- `risk_free_rate`: annualized risk-free rate for Sharpe/Sortino (default 0.0)
 - `slippage_pct`: slippage percentage per trade (default 0.0)
 - `commission_pct`: commission percentage per trade (default 0.0)
+- `risk_free_rate`: annualized risk-free rate for Sharpe/Sortino (default 0.0)
 """
 struct BacktestConfig
     initial_balance::Float64
     confidence_threshold::Float32
     payoff_ratio::Float64
     max_position_size::Float64
-    risk_free_rate::Float64
     slippage_pct::Float64
     commission_pct::Float64
+    risk_free_rate::Float64
 end
 
 function BacktestConfig(;
@@ -62,33 +62,18 @@ function BacktestConfig(;
     confidence_threshold = 0.85f0,
     payoff_ratio = 1.5,
     max_position_size = 10.0,
-    risk_free_rate = 0.0,
     slippage_pct = 0.0,
     commission_pct = 0.0,
+    risk_free_rate = 0.0,
 )
     BacktestConfig(
         Float64(initial_balance),
         Float32(confidence_threshold),
         Float64(payoff_ratio),
         Float64(max_position_size),
-        Float64(risk_free_rate),
         Float64(slippage_pct),
         Float64(commission_pct),
-    )
-end
-
-# Preserve the four-argument positional constructor for backward compatibility
-function BacktestConfig(
-    initial_balance::Real,
-    confidence_threshold::Real,
-    payoff_ratio::Real,
-    max_position_size::Real,
-)
-    BacktestConfig(;
-        initial_balance = initial_balance,
-        confidence_threshold = confidence_threshold,
-        payoff_ratio = payoff_ratio,
-        max_position_size = max_position_size,
+        Float64(risk_free_rate),
     )
 end
 
@@ -244,16 +229,7 @@ end
 Replay signals through the ExecutionEngine and compute performance metrics.
 Applies slippage and commission when configured.
 
-Position sizing on close uses the units stored at open (not the exit signal's
-Kelly size). Slippage is adverse for market orders: buys fill higher, sells
-lower (also adverse for short entries). Annualization uses calendar span from
-signal timestamps when that span is at least one day.
-
-Same-side re-entries accumulate position units with weighted-average entry,
-capping added units at `max_position_size` and charging commission only on
-units actually added. Non-trade marks use unslipped signal prices. Calmar
-uses final equity (MTM). total_trades counts closed round-trips (including
-flat closes with zero PnL); same-side fills are not closed trades.
+Close PnL always uses the units stored at open (not the exit signal's Kelly size).
 """
 function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::BacktestResult
     engine = ExecutionEngine(
@@ -267,10 +243,17 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     # Closed round-trips only (includes flat closes with pnl == 0); excludes same-side fills
     closed_trades = TradeRecord[]
     balance = config.initial_balance
-    # ticker -> open position (entry price, opened units, side, entry commission)
     positions = Dict{String, OpenPosition}()
 
     for signal in signals
+        # Skip same-side re-entry before invoking the engine so that no executed
+        # event is recorded for a fill that leaves the ledger unchanged.
+        existing = get(positions, signal.ticker, nothing)
+        if existing !== nothing && existing.side == signal.side
+            push!(equity_curve, balance)
+            continue
+        end
+
         decision = execute_signal!(engine, signal, balance)
 
         if decision.executed
@@ -281,7 +264,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 (open_pos.side == Buy && signal.side == Sell) ||
                 (open_pos.side == Sell && signal.side == Buy)
             )
-                # Close: use opened units, not exit Kelly size
+                # Close using opened units (not exit Kelly size)
                 entry_units = open_pos.units
                 entry_price = open_pos.entry_price
                 commission = entry_units * execution_price * (config.commission_pct / 100.0)
@@ -290,10 +273,9 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 if open_pos.side == Buy
                     gross_pnl = (execution_price - entry_price) * entry_units
                 else
-                    # Short close (buy to cover)
                     gross_pnl = (entry_price - execution_price) * entry_units
                 end
-                # Net trade PnL includes entry + close commissions so trade_log reconciles
+                # Include entry commission so trade_log PnL reconciles with cash
                 pnl = gross_pnl - commission - open_pos.entry_commission
                 balance += gross_pnl
                 delete!(positions, signal.ticker)
@@ -309,42 +291,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                 )
                 push!(trade_log, close_rec)
                 push!(closed_trades, close_rec)
-            elseif open_pos !== nothing && open_pos.side == signal.side
-                # Same-side re-entry: accumulate units (capped), weighted-average entry,
-                # charge commission only on units actually added
-                new_units = decision.position_units
-                room = max(0.0, config.max_position_size - open_pos.units)
-                actual_new_units = min(new_units, room)
-                new_commission = actual_new_units * execution_price * (config.commission_pct / 100.0)
-                balance -= new_commission
-                total_units = open_pos.units + actual_new_units
-                weighted_entry = if total_units > 0.0
-                    (open_pos.entry_price * open_pos.units + execution_price * actual_new_units) / total_units
-                else
-                    open_pos.entry_price
-                end
-                positions[signal.ticker] = OpenPosition(
-                    weighted_entry,
-                    total_units,
-                    open_pos.side,
-                    open_pos.entry_commission + new_commission,
-                    signal.price,
-                )
-                # Record same-side fill in trade_log for ledger completeness (not a close)
-                push!(
-                    trade_log,
-                    TradeRecord(
-                        signal.ticker,
-                        string(signal.side),
-                        signal.timestamp_ns,
-                        execution_price,
-                        actual_new_units,
-                        decision.kelly_fraction,
-                        0.0,
-                    ),
-                )
             else
-                # Open new position
                 units = decision.position_units
                 commission = units * execution_price * (config.commission_pct / 100.0)
                 balance -= commission
@@ -353,8 +300,24 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                     units,
                     signal.side,
                     commission,
-                    signal.price,
+                    execution_price,
                 )
+
+                # Long opens are silent until close; short opens logged with pnl=0
+                if signal.side == Sell
+                    push!(
+                        trade_log,
+                        TradeRecord(
+                            signal.ticker,
+                            string(signal.side),
+                            signal.timestamp_ns,
+                            execution_price,
+                            units,
+                            decision.kelly_fraction,
+                            0.0,
+                        ),
+                    )
+                end
             end
         elseif haskey(positions, signal.ticker)
             # Update mark price even when the signal is not executed (for MTM equity)
@@ -369,16 +332,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
             )
         end
 
-        # Mark-to-market equity: cash + unrealized PnL on open positions
-        mtm = balance
-        for (_, pos) in positions
-            if pos.side == Buy
-                mtm += (pos.last_mark_price - pos.entry_price) * pos.units
-            else
-                mtm += (pos.entry_price - pos.last_mark_price) * pos.units
-            end
-        end
-        push!(equity_curve, mtm)
+        push!(equity_curve, balance)
     end
 
     # Use final equity (MTM) for total_return so it matches equity_curve
@@ -412,7 +366,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
         total_return,
         max_dd,
         wr,
-        length(closed_trades),
+        length(trade_log),
         sr,
         sortino,
         calmar,
