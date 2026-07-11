@@ -23,6 +23,97 @@ using DendriteTrader
         @test !passes_gate(s, 0.95f0)
     end
 
+    @testset "validate_signal" begin
+        # Helper: valid signal dict
+        valid = Dict(
+            "ticker" => "MARKET-A",
+            "side" => "BUY",
+            "price" => 100.0,
+            "quantity" => 1.0,
+            "confidence" => 0.9,
+            "timestamp_ns" => 1_000,
+        )
+
+        # Valid signal returns nothing
+        @test validate_signal(valid) === nothing
+
+        # Zero timestamp is rejected (must be > 0 per contract)
+        zero_ts = copy(valid); zero_ts["timestamp_ns"] = 0
+        @test occursin("timestamp", validate_signal(zero_ts))
+
+        # Missing each required field returns error
+        for field in ("ticker", "side", "price", "confidence", "timestamp_ns")
+            d = copy(valid)
+            delete!(d, field)
+            @test validate_signal(d) isa String
+            @test occursin(field, validate_signal(d))
+        end
+
+        # Empty ticker returns error
+        empty_ticker = copy(valid); empty_ticker["ticker"] = ""
+        @test occursin("ticker", validate_signal(empty_ticker))
+
+        # Invalid side returns error
+        for bad_side in ("hold", "Buy", "", "BUY SELL")
+            d = copy(valid); d["side"] = bad_side
+            r = validate_signal(d)
+            @test r isa String
+            @test occursin("side", r)
+        end
+
+        # Negative price returns error
+        neg_price = copy(valid); neg_price["price"] = -1.0
+        @test occursin("price", validate_signal(neg_price))
+
+        # Zero price returns error
+        zero_price = copy(valid); zero_price["price"] = 0.0
+        @test occursin("price", validate_signal(zero_price))
+
+        # Confidence out of range returns error
+        for bad_conf in (-0.1, 1.1, -1.0, 2.0)
+            d = copy(valid); d["confidence"] = bad_conf
+            @test occursin("confidence", validate_signal(d))
+        end
+
+        # Boundary confidence values are accepted
+        for edge_conf in (0.0, 1.0)
+            d = copy(valid); d["confidence"] = edge_conf
+            @test validate_signal(d) === nothing
+        end
+
+        # Bool rejected for price
+        bool_price = copy(valid); bool_price["price"] = true
+        @test occursin("number", validate_signal(bool_price))
+
+        # Bool rejected for confidence
+        bool_conf = copy(valid); bool_conf["confidence"] = false
+        @test occursin("number", validate_signal(bool_conf))
+
+        # Bool rejected for timestamp
+        bool_ts = copy(valid); bool_ts["timestamp_ns"] = true
+        @test occursin("integer", validate_signal(bool_ts))
+
+        # NaN rejected for price
+        nan_price = copy(valid); nan_price["price"] = NaN
+        @test occursin("finite", validate_signal(nan_price))
+
+        # Inf rejected for price
+        inf_price = copy(valid); inf_price["price"] = Inf
+        @test occursin("finite", validate_signal(inf_price))
+
+        # NaN rejected for confidence
+        nan_conf = copy(valid); nan_conf["confidence"] = NaN
+        @test occursin("finite", validate_signal(nan_conf))
+
+        # Inf rejected for confidence
+        inf_conf = copy(valid); inf_conf["confidence"] = Inf
+        @test occursin("finite", validate_signal(inf_conf))
+
+        # Negative timestamp returns error
+        neg_ts = copy(valid); neg_ts["timestamp_ns"] = -1
+        @test occursin("timestamp", validate_signal(neg_ts))
+    end
+
     @testset "ExecutionEngine — confidence gate" begin
         engine = ExecutionEngine(confidence_threshold = 0.85f0)
 
@@ -458,6 +549,80 @@ using DendriteTrader
             @test result.total_trades == 1
             @test result.trade_log[1].price ≈ 99.0 atol=1e-9
         end
+
+        @testset "compute_sharpe_ratio with per-signal risk-free" begin
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.01, 0.02, -0.005, 0.015, 0.008]
+            s = sharpe(r, 0.0, 5, false)
+            @test s > 0.0
+            @test isfinite(s)
+            s_low = sharpe(r, 0.005, 5, false)
+            @test s_low < s
+        end
+
+        @testset "compute_sortino_ratio consistent with Sharpe" begin
+            sortino = DendriteTrader.Backtest.compute_sortino_ratio
+            sharpe = DendriteTrader.Backtest.compute_sharpe_ratio
+            r = [0.02, -0.01, 0.03, -0.005, 0.01]
+            s = sortino(r, 0.0, 5, false)
+            @test isfinite(s)
+            @test s > 0.0
+            @test s >= sharpe(r, 0.0, 5, false) - 1e-9
+        end
+    end
+end
+
+
+@testset "strip_zmq_topic handles ASCII and multi-byte UTF-8" begin
+    strip = DendriteTrader.strip_zmq_topic
+    @test strip("trade.{\"a\":1}", "trade.") == "{\"a\":1}"
+    # Multi-byte prefix: "éa" is 3 bytes (é=2, a=1), 2 chars
+    topic = "éa"
+    payload = "{\"x\":1}"
+    msg = topic * payload
+    @test startswith(msg, topic)
+    @test strip(msg, topic) == payload
+    @test strip("no-prefix", "trade.") == "no-prefix"
+    @test strip("trade.", "trade.") == ""
+end
+
+@testset "ZMQ topic filtering" begin
+    endpoint = "ipc:///tmp/dendrite-test-topic-$(getpid())-$(time_ns()).ipc"
+    ctx = ZMQ.Context()
+    pub = ZMQ.Socket(ctx, ZMQ.PUB)
+    ZMQ.bind(pub, endpoint)
+    sleep(0.1)
+
+    engine = ExecutionEngine(confidence_threshold = Float32(0.50))
+    decisions = ExecutionDecision[]
+
+    t = @async start!(
+        engine,
+        zmq_endpoint = endpoint,
+        zmq_topic = "trade.",
+        account_balance = 10_000.0,
+        on_decision = d -> push!(decisions, d),
+        timeout_s = 5.0,
+    )
+    # Allow SUB to connect and subscription to propagate (slow joiner)
+    sleep(0.5)
+
+    signal_json = JSON.json(Dict(
+        "ticker" => "BTC-USD",
+        "side" => "BUY",
+        "price" => 50_000.0,
+        "quantity" => 0.1,
+        "confidence" => 0.92,
+        "timestamp_ns" => 1_000_000_000,
+    ))
+
+    # Resend until both trade messages are observed (or deadline)
+    deadline = time() + 4.0
+    while length(decisions) < 2 && time() < deadline
+        ZMQ.send(pub, "trade." * signal_json)
+        ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
+        ZMQ.send(pub, "trade." * signal_json)
+        sleep(0.2)
     end
 end
 
