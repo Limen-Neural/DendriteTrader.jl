@@ -165,6 +165,156 @@ println(position.risk)
 | `PositionSize` | Result struct with units, Kelly fraction, confidence, risk tier, and account risk percentage |
 | `size_position(; confidence, price, account_balance, payoff_ratio, kelly_scalar)` | Computes full position sizing from neural confidence |
 
+## Rate Limiter
+
+Token bucket rate limiter for controlling API call rates. Thread-safe via `ReentrantLock`. Integrates with `DydxClient` to throttle REST requests.
+
+```julia
+using DendriteTrader
+
+# Create a limiter: 10 requests/sec, burst of 10
+limiter = RateLimiter(requests_per_second = 10.0, burst = 10.0)
+
+# Block until a token is available
+acquire!(limiter)
+
+# Update rate at runtime
+set_rate!(limiter, 20.0)
+```
+
+### RateLimiter API
+
+| Type / Function | Description |
+|-----------------|-------------|
+| `RateLimiter(; requests_per_second, burst)` | Create a token bucket limiter. `requests_per_second` sets the refill rate; `burst` sets the max token capacity. Both must be `> 0`. |
+| `acquire!(limiter)` | Block until a token is available. Refills tokens based on elapsed time. Thread-safe. |
+| `set_rate!(limiter, requests_per_second)` | Update the refill rate at runtime. Thread-safe. |
+
+### Integrating RateLimiter with DydxClient
+
+```julia
+limiter = RateLimiter(requests_per_second = 5.0, burst = 5.0)
+client = DydxClient(
+    base_url = "https://indexer.dydx.trade/v4",
+    rate_limit = limiter,
+)
+```
+
+## Price Cache
+
+Short TTL cache for dYdX price data. Avoids redundant REST calls when prices are queried frequently. Thread-safe via `ReentrantLock`.
+
+```julia
+using DendriteTrader
+
+# Create a cache with 5-second TTL
+cache = PriceCache(ttl_s = 5.0)
+
+# Manually store a price
+price = DydxPrice("BTC-USD", 65_000.0, 64_990.0, 65_010.0)
+put_cached!(cache, "BTC-USD", price)
+
+# Retrieve if fresh (returns nothing if expired)
+cached = get_cached(cache, "BTC-USD")
+
+# Check freshness
+is_fresh(cache, "BTC-USD")  # true if within TTL
+
+# Invalidate a single ticker
+invalidate!(cache, "BTC-USD")
+
+# Clear all entries
+clear!(cache)
+
+# Current entry count
+cache_size(cache)
+```
+
+### PriceCache API
+
+| Type / Function | Description |
+|-----------------|-------------|
+| `PriceCache(; ttl_s)` | Create a price cache with TTL in seconds (default 5.0). |
+| `get_cached(cache, ticker)` | Return cached `DydxPrice` if fresh, `nothing` otherwise. |
+| `put_cached!(cache, ticker, price)` | Store a price with current timestamp. |
+| `invalidate!(cache, ticker)` | Remove a specific ticker from the cache. |
+| `clear!(cache)` | Remove all entries from the cache. |
+| `cache_size(cache)` | Return the number of cached entries. |
+| `is_fresh(cache, ticker)` | Return `true` if the cached entry is within TTL. |
+
+### Integrating PriceCache with DydxClient
+
+```julia
+cache = PriceCache(ttl_s = 10.0)
+client = DydxClient(
+    base_url = "https://indexer.dydx.trade/v4",
+    cache = cache,
+)
+
+# get_price will check cache first, then fetch via REST
+price = get_price(client, "BTC-USD")
+```
+
+## Backtest
+
+Paper-trading backtest harness. Replays historical signals through the `ExecutionEngine` and computes performance metrics (total return, max drawdown, win rate). Supports loading signals from JSON or CSV and exporting results.
+
+```julia
+using DendriteTrader
+
+# Configure
+config = BacktestConfig(
+    initial_balance = 10_000.0,
+    confidence_threshold = 0.85,
+    payoff_ratio = 1.5,
+)
+
+# Load historical signals
+signals = load_signals_json("data/signals.json")
+# or: signals = load_signals_csv("data/signals.csv")
+
+# Run backtest
+result = run_backtest(config, signals)
+
+# Print summary table
+print_summary(result)
+
+# Export results
+export_equity_csv(result, "output/equity.csv")
+export_trade_log_json(result, "output/trades.json")
+```
+
+### Backtest API
+
+| Type / Function | Description |
+|-----------------|-------------|
+| `BacktestConfig(; initial_balance, confidence_threshold, payoff_ratio, max_position_size, risk_free_rate, slippage_pct, commission_pct)` | Configuration for a backtest run. Defaults: balance `$10,000`, threshold `0.85`, payoff `1.5`, max units `10.0`, risk-free rate `0.0`, slippage `0.0%`, commission `0.0%`. |
+| `run_backtest(config, signals)` | Replay `Vector{TradeSignal}` through the engine. Returns a `BacktestResult`. |
+| `BacktestResult` | Result struct with `config`, `initial_balance`, `final_balance`, `equity_curve`, `trade_log`, `events`, `total_return`, `max_drawdown`, `win_rate`, `total_trades`. |
+| `print_summary(result)` | Print a formatted summary table to stdout. |
+| `load_signals_json(path)` | Load signals from a JSON file (array of signal dicts). |
+| `load_signals_csv(path)` | Load signals from a CSV file. Expected columns: `ticker, side, price, quantity, confidence, timestamp_ns`. |
+| `export_equity_csv(result, path)` | Export the equity curve to CSV (`index,equity`). |
+| `export_trade_log_json(result, path)` | Export the trade log to JSON. |
+
+### BacktestResult Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `config` | `BacktestConfig` | Configuration used for the backtest run |
+| `initial_balance` | `Float64` | Starting account balance |
+| `final_balance` | `Float64` | Ending account balance |
+| `total_return` | `Float64` | Total return percentage |
+| `max_drawdown` | `Float64` | Maximum drawdown percentage |
+| `win_rate` | `Float64` | Fraction of profitable trades (of closed trades) |
+| `total_trades` | `Int` | Number of trades executed |
+| `equity_curve` | `Vector{Float64}` | Balance after each signal |
+| `trade_log` | `Vector{TradeRecord}` | All executed trades with PnL |
+| `events` | `Vector{SignalEvent}` | Raw engine events |
+| `sharpe_ratio` | `Float64` | Annualized Sharpe ratio |
+| `sortino_ratio` | `Float64` | Annualized Sortino ratio |
+| `calmar_ratio` | `Float64` | Calmar ratio (annualized return / max drawdown) |
+
 ## Signal Format
 
 The ZMQ listener expects JSON objects matching this schema:

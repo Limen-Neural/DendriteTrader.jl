@@ -75,7 +75,7 @@ export TradeSignal, TradeSide, Buy, Sell, Neutral, ExecutionEngine, ExecutionDec
 export validate_signal, execute_signal!, latency_ns, passes_gate
 export DydxClient, DydxPrice, get_price, mid_price, spread_bps
 export RateLimiter, acquire!, set_rate!
-export PriceCache, invalidate!, clear!, cache_size
+export PriceCache, invalidate!, clear!, cache_size, get_cached, put_cached!, is_fresh
 export start!, stop!, events, fill_rate
 export kelly_fraction, from_confidence, half_kelly
 export RiskTier, Aggressive, Moderate, Conservative, Minimal, risk_tier
@@ -328,7 +328,9 @@ Signal the engine to stop its ZMQ listener loop.
 Call this from another task or thread to gracefully shut down `start!`.
 """
 function stop!(engine::ExecutionEngine)
-    Threads.atomic_store!(engine.should_stop, true)
+    # Threads.Atomic supports getindex/setindex! (engine.should_stop[]);
+    # Threads.atomic_store!/atomic_load are for AtomicMemory / lower-level APIs.
+    engine.should_stop[] = true
 end
 
 """
@@ -774,7 +776,27 @@ end
 # ── ZMQ Signal Listener ───────────────────────────────────────────────────────
 
 """
-    start!(engine; zmq_endpoint, account_balance, on_decision, timeout_s)
+    strip_zmq_topic(msg, topic) -> String
+
+Remove a ZMQ topic prefix from `msg` using byte (codeunit) length so multi-byte
+UTF-8 topics are stripped correctly. Falls back to the full message when the
+topic is empty or not a prefix.
+"""
+function strip_zmq_topic(msg::AbstractString, topic::AbstractString)
+    if isempty(topic) || !startswith(msg, topic)
+        return String(msg)
+    end
+    # ncodeunits is the correct end-of-prefix byte index for UTF-8 strings
+    prefix_bytes = ncodeunits(topic)
+    if prefix_bytes >= ncodeunits(msg)
+        return ""
+    end
+    return msg[nextind(msg, prefix_bytes):end]
+end
+
+"""
+    start!(engine; zmq_endpoint, zmq_topic, account_balance, on_decision,
+           timeout_s, reconnect_interval_s, max_reconnect_attempts)
 
 Start the ZMQ SUB listener loop (requires ZMQ.jl).
 
@@ -782,11 +804,14 @@ Subscribes to `zmq_endpoint` and processes incoming JSON trade signals
 through the execution engine, calling `on_decision` for each result.
 
 # Arguments
-- `engine`:          `ExecutionEngine` instance
-- `zmq_endpoint`:    ZMQ endpoint (e.g. "tcp://localhost:5555" or "ipc:///tmp/signals.ipc")
-- `account_balance`: account size for Kelly sizing
-- `on_decision`:     callback `(ExecutionDecision) -> Nothing`
-- `timeout_s`:       total seconds to run before auto-stopping (nothing = run forever)
+- `engine`:                   `ExecutionEngine` instance
+- `zmq_endpoint`:             ZMQ endpoint (e.g. "tcp://localhost:5555" or "ipc:///tmp/signals.ipc")
+- `zmq_topic`:                ZMQ topic filter prefix (default "" = all messages)
+- `account_balance`:          account size for Kelly sizing
+- `on_decision`:              callback `(ExecutionDecision) -> Nothing`
+- `timeout_s`:                total seconds to run before auto-stopping (nothing = run forever)
+- `reconnect_interval_s`:     seconds to wait between reconnection attempts (default 5.0)
+- `max_reconnect_attempts`:   max reconnection attempts; 0 = infinite (default 0)
 
 # Shutdown
 
@@ -801,6 +826,7 @@ engine = ExecutionEngine(confidence_threshold=Float32(0.85))
 t = @async start!(
     engine,
     zmq_endpoint="tcp://localhost:5555",
+    zmq_topic="trade.signal",
     on_decision = decision -> println("Decision: \$(decision.executed)"),
 )
 
@@ -812,59 +838,132 @@ stop!(engine)
 function start!(
     engine::ExecutionEngine;
     zmq_endpoint::String = "tcp://localhost:5555",
+    zmq_topic::String = "",
     account_balance::Float64 = 10_000.0,
     on_decision = decision -> nothing,
     timeout_s::Union{Float64, Nothing} = nothing,
+    reconnect_interval_s::Float64 = 5.0,
+    max_reconnect_attempts::Int = 0,
 )
     # Allow engine reuse across stop/start cycles.
-    Threads.atomic_store!(engine.should_stop, false)
-
-    ctx = ZMQ.Context()
-    socket = ZMQ.Socket(ctx, ZMQ.SUB)
-    ZMQ.subscribe(socket, "")
-    ZMQ.connect(socket, zmq_endpoint)
-
-    # Set receive timeout to 1 second so we can check should_stop periodically
-    ZMQ.set_rcvtimeo(socket, 1000)
-
-    @info "[execution] ZMQ SUB connected to $zmq_endpoint"
+    engine.should_stop[] = false
 
     start_time = time()
-    try
-        while !Threads.atomic_load(engine.should_stop)
-            if timeout_s !== nothing && (time() - start_time) >= timeout_s
-                @info "[execution] Timeout reached, stopping listener"
-                break
-            end
+    reconnect_count = 0
 
-            try
-                msg = ZMQ.recv(socket)
-                data = JSON.parse(String(msg))
+    while !engine.should_stop[]
+        if timeout_s !== nothing && (time() - start_time) >= timeout_s
+            @info "[execution] Timeout reached, stopping listener"
+            break
+        end
 
-                # Validate signal before processing
-                err = validate_signal(data)
-                if err !== nothing
-                    @warn "[execution] Invalid signal: $err"
-                    continue
+        ctx = nothing
+        socket = nothing
+        received_ok = false
+        try
+            # Construct inside try so allocation failures are reconnectable
+            # and do not leak a Context if Socket construction throws.
+            ctx = ZMQ.Context()
+            socket = ZMQ.Socket(ctx, ZMQ.SUB)
+            ZMQ.subscribe(socket, zmq_topic)
+            ZMQ.connect(socket, zmq_endpoint)
+
+            # Set receive timeout to 1 second so we can check should_stop periodically
+            socket.rcvtimeo = 1000
+
+            @info "[execution] ZMQ SUB connected to $zmq_endpoint (topic=\"$(zmq_topic)\")"
+
+            while !engine.should_stop[]
+                if timeout_s !== nothing && (time() - start_time) >= timeout_s
+                    @info "[execution] Timeout reached, stopping listener"
+                    break
                 end
 
-                signal = TradeSignal(data)
-                decision = execute_signal!(engine, signal, account_balance)
-                on_decision(decision)
-            catch e
-                if e isa ZMQ.TimeoutError
-                    # recv timeout, loop back to check should_stop
-                    continue
-                else
-                    rethrow(e)
+                try
+                    msg = String(ZMQ.recv(socket))
+                    payload = strip_zmq_topic(msg, zmq_topic)
+                    data = JSON.parse(payload)
+
+                    # Validate signal before processing
+                    err = validate_signal(data)
+                    if err !== nothing
+                        @warn "[execution] Invalid signal: $err"
+                        continue
+                    end
+
+                    signal = TradeSignal(data)
+                    decision = execute_signal!(engine, signal, account_balance)
+                    on_decision(decision)
+                    # Only reset reconnect budget after useful work on the socket
+                    received_ok = true
+                catch e
+                    if e isa ZMQ.TimeoutError
+                        # recv timeout, loop back to check should_stop
+                        continue
+                    elseif e isa ZMQ.StateError
+                        @warn "[execution] ZMQ transport error, reconnecting: $e"
+                        break  # break inner loop to reconnect
+                    else
+                        # Application-level errors (JSON, callback): log, keep listening
+                        @warn "[execution] Message handling error (not reconnecting): $e"
+                        continue
+                    end
+                end
+            end
+        catch e
+            if e isa InterruptException
+                rethrow()
+            else
+                @warn "[execution] ZMQ connection error: $e"
+            end
+        finally
+            if socket !== nothing
+                try
+                    ZMQ.close(socket)
+                catch
+                end
+            end
+            if ctx !== nothing
+                try
+                    ZMQ.close(ctx)
+                catch
                 end
             end
         end
-    finally
-        ZMQ.close(socket)
-        ZMQ.close(ctx)
-        @info "[execution] ZMQ listener stopped"
+
+        # Reset reconnect counter only after the socket actually received data
+        if received_ok
+            reconnect_count = 0
+        end
+
+        # If we exited normally (should_stop or timeout), don't reconnect
+        if engine.should_stop[]
+            break
+        end
+        if timeout_s !== nothing && (time() - start_time) >= timeout_s
+            break
+        end
+
+        # Reconnect logic
+        reconnect_count += 1
+        if max_reconnect_attempts > 0 && reconnect_count >= max_reconnect_attempts
+            @warn "[execution] Max reconnect attempts ($max_reconnect_attempts) reached, stopping"
+            break
+        end
+
+        @info "[execution] Reconnecting in $(reconnect_interval_s)s (attempt $reconnect_count)..."
+        # Sleep in small chunks so stop!() or timeout can take effect promptly
+        elapsed = 0.0
+        while elapsed < reconnect_interval_s && !engine.should_stop[]
+            if timeout_s !== nothing && (time() - start_time) >= timeout_s
+                break
+            end
+            sleep(min(0.5, reconnect_interval_s - elapsed))
+            elapsed += 0.5
+        end
     end
+
+    @info "[execution] ZMQ listener stopped"
 end
 
 # ── Backtest Harness ──────────────────────────────────────────────────────────
