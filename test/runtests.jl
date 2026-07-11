@@ -269,6 +269,134 @@ using DendriteTrader
         @test zero_dec.reason == "zero-sized position"
     end
 
+    @testset "Sell and Neutral signals" begin
+        @testset "Sell signal on existing position decrements position" begin
+            engine = ExecutionEngine()
+            buy = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-E",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec_buy = execute_signal!(engine, buy, 10_000.0)
+            @test dec_buy.executed
+            pos_after_buy = engine.positions["MARKET-E"]
+            @test pos_after_buy > 0.0
+
+            sell = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-E",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec_sell = execute_signal!(engine, sell, 10_000.0)
+            @test dec_sell.executed
+            @test engine.positions["MARKET-E"] < pos_after_buy
+        end
+
+        @testset "Sell signal on empty position clamped to 0" begin
+            engine = ExecutionEngine()
+            sell = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-F",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec = execute_signal!(engine, sell, 10_000.0)
+            @test dec.executed
+            @test engine.positions["MARKET-F"] == 0.0
+        end
+
+        @testset "Neutral signal rejected with 'neutral signal' reason" begin
+            engine = ExecutionEngine()
+            neutral = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-G",
+                    "side"=>"NEUTRAL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            dec = execute_signal!(engine, neutral, 10_000.0)
+            @test !dec.executed
+            @test dec.reason == "neutral signal"
+        end
+
+        @testset "Buy then Sell — position goes to zero" begin
+            engine = ExecutionEngine()
+            buy = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-H",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, buy, 10_000.0)
+            @test engine.positions["MARKET-H"] > 0.0
+
+            sell = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-H",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, sell, 10_000.0)
+            @test engine.positions["MARKET-H"] == 0.0
+        end
+
+        @testset "Multiple Buy then Sell — correct netting" begin
+            engine = ExecutionEngine()
+            buy_sig = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-I",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, buy_sig, 10_000.0)
+            execute_signal!(engine, buy_sig, 10_000.0)
+            pos_after_two_buys = engine.positions["MARKET-I"]
+
+            sell_sig = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-I",
+                    "side"=>"SELL",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
+                ),
+            )
+            execute_signal!(engine, sell_sig, 10_000.0)
+            # Default max_position_size=10; two capped buys then one sell → exactly 10.0
+            @test engine.positions["MARKET-I"] == 10.0
+            @test engine.positions["MARKET-I"] < pos_after_two_buys
+        end
+    end
     @testset "Backtest" begin
         @testset "BacktestConfig constructor with defaults" begin
             cfg = BacktestConfig()
