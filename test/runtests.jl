@@ -780,7 +780,7 @@ end
         "price" => 50_000.0,
         "quantity" => 0.1,
         "confidence" => 0.92,
-        "timestamp_ns" => 0,
+        "timestamp_ns" => 1_000_000_000,
     ))
 
     # Resend until both trade messages are observed (or deadline)
