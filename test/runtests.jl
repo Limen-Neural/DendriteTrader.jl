@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 using Test
+using JSON
+using ZMQ
 using DendriteTrader
 
 @testset "DendriteTrader" begin
@@ -24,7 +26,7 @@ using DendriteTrader
     @testset "ExecutionEngine — confidence gate" begin
         engine = ExecutionEngine(confidence_threshold = 0.85f0)
 
-        # Signal above threshold → executed
+        # Signal above threshold -> executed
         sig_hi = TradeSignal(
             Dict(
                 "ticker"=>"MARKET-B",
@@ -41,7 +43,7 @@ using DendriteTrader
         @test dec.kelly_fraction > 0.0
         @test dec.applied_fraction > 0.0
 
-        # Signal below threshold → rejected
+        # Signal below threshold -> rejected
         sig_lo = TradeSignal(
             Dict(
                 "ticker"=>"MARKET-B",
