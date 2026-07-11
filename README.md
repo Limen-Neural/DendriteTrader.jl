@@ -288,7 +288,7 @@ export_trade_log_json(result, "output/trades.json")
 
 | Type / Function | Description |
 |-----------------|-------------|
-| `BacktestConfig(; initial_balance, confidence_threshold, payoff_ratio, max_position_size)` | Configuration for a backtest run. Defaults: balance `$10,000`, threshold `0.85`, payoff `1.5`, max units `10.0`. |
+| `BacktestConfig(; initial_balance, confidence_threshold, payoff_ratio, max_position_size, risk_free_rate, slippage_pct, commission_pct)` | Configuration for a backtest run. Defaults: balance `$10,000`, threshold `0.85`, payoff `1.5`, max units `10.0`, risk-free rate `0.0`, slippage `0.0%`, commission `0.0%`. |
 | `run_backtest(config, signals)` | Replay `Vector{TradeSignal}` through the engine. Returns a `BacktestResult`. |
 | `BacktestResult` | Result struct with `config`, `initial_balance`, `final_balance`, `equity_curve`, `trade_log`, `events`, `total_return`, `max_drawdown`, `win_rate`, `total_trades`. |
 | `print_summary(result)` | Print a formatted summary table to stdout. |
