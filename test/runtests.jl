@@ -624,6 +624,14 @@ end
         ZMQ.send(pub, "trade." * signal_json)
         sleep(0.2)
     end
+
+    # Assert topic filtering: both trade.* messages processed, heartbeat.* ignored
+    @test length(decisions) == 2
+
+    stop!(engine)
+    wait(t)
+    close(pub)
+    close(ctx)
 end
 
 # Integration tests (gated behind DYDX_INTEGRATION=true)
