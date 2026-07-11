@@ -616,11 +616,12 @@ end
         "timestamp_ns" => 1_000_000_000,
     ))
 
+    # Heartbeat should be filtered out by topic subscription
+    ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
+
     # Resend until both trade messages are observed (or deadline)
     deadline = time() + 4.0
     while length(decisions) < 2 && time() < deadline
-        ZMQ.send(pub, "trade." * signal_json)
-        ZMQ.send(pub, "heartbeat." * JSON.json(Dict("status" => "ok")))
         ZMQ.send(pub, "trade." * signal_json)
         sleep(0.2)
     end
