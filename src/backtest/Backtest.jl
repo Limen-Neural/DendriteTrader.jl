@@ -273,7 +273,22 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
         # event is recorded for a fill that leaves the ledger unchanged.
         existing = get(positions, signal.ticker, nothing)
         if existing !== nothing && existing.side == signal.side
-            push!(equity_curve, balance)
+            positions[signal.ticker] = OpenPosition(
+                existing.entry_price,
+                existing.units,
+                existing.side,
+                existing.entry_commission,
+                signal.price,
+            )
+            mtm = balance
+            for (_, pos) in positions
+                if pos.side == Buy
+                    mtm += (pos.last_mark_price - pos.entry_price) * pos.units
+                else
+                    mtm += (pos.entry_price - pos.last_mark_price) * pos.units
+                end
+            end
+            push!(equity_curve, mtm)
             continue
         end
 
@@ -355,7 +370,15 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
             )
         end
 
-        push!(equity_curve, balance)
+        mtm = balance
+        for (_, pos) in positions
+            if pos.side == Buy
+                mtm += (pos.last_mark_price - pos.entry_price) * pos.units
+            else
+                mtm += (pos.entry_price - pos.last_mark_price) * pos.units
+            end
+        end
+        push!(equity_curve, mtm)
     end
 
     # Use final equity (MTM) for total_return so it matches equity_curve
