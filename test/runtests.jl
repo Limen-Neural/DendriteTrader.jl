@@ -378,6 +378,17 @@ using DendriteTrader
             @test cache_size(cache) == 2
         end
     end
+    @testset "Sell and Neutral signals" begin
+        @testset "Sell signal on existing position decrements position" begin
+            engine = ExecutionEngine()
+            buy = TradeSignal(
+                Dict(
+                    "ticker"=>"MARKET-E",
+                    "side"=>"BUY",
+                    "price"=>50.0,
+                    "quantity"=>1.0,
+                    "confidence"=>0.92,
+                    "timestamp_ns"=>1_000,
                 ),
             )
             dec_buy = execute_signal!(engine, buy, 10_000.0)
