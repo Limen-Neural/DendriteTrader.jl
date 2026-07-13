@@ -63,10 +63,7 @@ using DendriteTrader
 
     @testset "get_price — timeout/network failure returns nothing" begin
         # Use a very small timeout and a reserved non-routable test IP to exercise timeout handling.
-        client_timeout = DydxClient(
-            base_url = "http://192.0.2.1/v4",
-            timeout_s = 0.01,
-        )
+        client_timeout = DydxClient(base_url = "http://192.0.2.1/v4", timeout_s = 0.01)
         price = get_price(client_timeout, "BTC-USD")
         @test price === nothing
     end

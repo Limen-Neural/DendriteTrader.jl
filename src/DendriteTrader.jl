@@ -546,7 +546,8 @@ function acquire!(limiter::RateLimiter)
             # Refill again after sleep (preserve any fractional credit)
             now2 = time()
             elapsed2 = now2 - limiter.last_refill
-            limiter.tokens = min(limiter.max_tokens, limiter.tokens + elapsed2 * limiter.refill_rate)
+            limiter.tokens =
+                min(limiter.max_tokens, limiter.tokens + elapsed2 * limiter.refill_rate)
             limiter.last_refill = now2
         end
 
@@ -875,6 +876,10 @@ function start!(
             socket.rcvtimeo = 1000
 
             @info "[execution] ZMQ SUB connected to $zmq_endpoint (topic=\"$(zmq_topic)\")"
+            # NOTE: ZMQ.connect is asynchronous and succeeds even with no live
+            # peer, so do NOT treat it as healthy progress here. Only reset the
+            # reconnect budget after actually receiving/processing a message
+            # (see received_ok = true in the recv path below).
 
             while !engine.should_stop[]
                 if timeout_s !== nothing && (time() - start_time) >= timeout_s
@@ -897,7 +902,7 @@ function start!(
                     signal = TradeSignal(data)
                     decision = execute_signal!(engine, signal, account_balance)
                     on_decision(decision)
-                    # Only reset reconnect budget after useful work on the socket
+                    # Also mark healthy on successful message processing
                     received_ok = true
                 catch e
                     if e isa ZMQ.TimeoutError
@@ -934,7 +939,7 @@ function start!(
             end
         end
 
-        # Reset reconnect counter only after the socket actually received data
+        # Reset reconnect counter after successful message processing
         if received_ok
             reconnect_count = 0
         end

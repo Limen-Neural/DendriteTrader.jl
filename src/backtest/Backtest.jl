@@ -78,22 +78,6 @@ function BacktestConfig(;
 end
 
 """
-    OpenPosition
-
-Internal open position tracked by the backtest engine.
-
-# Fields
-- `entry_price`: price at which the position was opened
-- `units`: position size from the opening decision
-- `is_long`: `true` for long, `false` for short
-"""
-struct OpenPosition
-    entry_price::Float64
-    units::Float64
-    is_long::Bool
-end
-
-"""
     TradeRecord
 
 Record of a single trade in the backtest.
@@ -311,6 +295,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                     entry_units,
                     decision.kelly_fraction,
                     pnl,
+                    true,
                 )
                 push!(trade_log, close_rec)
                 push!(closed_trades, close_rec)
@@ -338,6 +323,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                             units,
                             decision.kelly_fraction,
                             0.0,
+                            false,
                         ),
                     )
                 end
