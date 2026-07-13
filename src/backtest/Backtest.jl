@@ -247,8 +247,6 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
 
     equity_curve = Float64[config.initial_balance]
     trade_log = TradeRecord[]
-    # Closed round-trips only (includes flat closes with pnl == 0); excludes same-side fills
-    closed_trades = TradeRecord[]
     balance = config.initial_balance
     positions = Dict{String, OpenPosition}()
 
@@ -298,7 +296,6 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
                     true,
                 )
                 push!(trade_log, close_rec)
-                push!(closed_trades, close_rec)
             else
                 units = decision.position_units
                 commission = units * execution_price * (config.commission_pct / 100.0)
@@ -377,7 +374,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
         total_return,
         max_dd,
         wr,
-        length(trade_log),
+        length(closed_trades),
         sr,
         sortino,
         calmar,
