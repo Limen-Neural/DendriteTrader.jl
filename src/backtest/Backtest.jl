@@ -353,7 +353,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
     final_balance = final_equity
     total_return = (final_equity - config.initial_balance) / config.initial_balance * 100.0
     max_dd = compute_max_drawdown(equity_curve)
-    # Only closed trades enter the log; include break-even (pnl == 0) in win rate
+    # Win rate uses only closed round-trips; include break-even (pnl == 0)
     closed_trades = filter(t -> t.is_closed, trade_log)
     num_winning = count(t -> t.pnl > 0.0, closed_trades)
     wr = isempty(closed_trades) ? 0.0 : num_winning / length(closed_trades)
@@ -374,7 +374,7 @@ function run_backtest(config::BacktestConfig, signals::Vector{TradeSignal})::Bac
         total_return,
         max_dd,
         wr,
-        length(closed_trades),
+        length(trade_log),
         sr,
         sortino,
         calmar,
