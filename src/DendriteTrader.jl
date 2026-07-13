@@ -939,7 +939,7 @@ function start!(
             end
         end
 
-        # Reset reconnect counter after a successful connection or received data
+        # Reset reconnect counter after successful message processing
         if received_ok
             reconnect_count = 0
         end
