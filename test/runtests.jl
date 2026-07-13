@@ -563,6 +563,7 @@ using DendriteTrader
         end
 
         @testset "run_backtest with buy+sell — PnL computed" begin
+            # max_position_size default 10.0 caps Kelly units → deterministic PnL
             cfg = BacktestConfig(initial_balance = 10_000.0)
             signals = [
                 TradeSignal(Dict(
@@ -717,6 +718,9 @@ using DendriteTrader
             @test fmt(-5000.10) == "-5,000.10"
             @test fmt(0.0) == "0.00"
             @test fmt(1_000_000.00) == "1,000,000.00"
+            @test fmt(NaN) == "NaN"
+            @test fmt(Inf) == "Inf"
+            @test fmt(-Inf) == "-Inf"
         end
 
         @testset "compute_max_drawdown" begin
