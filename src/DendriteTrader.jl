@@ -876,9 +876,10 @@ function start!(
             socket.rcvtimeo = 1000
 
             @info "[execution] ZMQ SUB connected to $zmq_endpoint (topic=\"$(zmq_topic)\")"
-            # Treat a successful connection as healthy progress so transient
-            # drops don't exhaust max_reconnect_attempts on an idle broker.
-            received_ok = true
+            # NOTE: ZMQ.connect is asynchronous and succeeds even with no live
+            # peer, so do NOT treat it as healthy progress here. Only reset the
+            # reconnect budget after actually receiving/processing a message
+            # (see received_ok = true in the recv path below).
 
             while !engine.should_stop[]
                 if timeout_s !== nothing && (time() - start_time) >= timeout_s
