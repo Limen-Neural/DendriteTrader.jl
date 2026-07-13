@@ -876,6 +876,9 @@ function start!(
             socket.rcvtimeo = 1000
 
             @info "[execution] ZMQ SUB connected to $zmq_endpoint (topic=\"$(zmq_topic)\")"
+            # Treat a successful connection as healthy progress so transient
+            # drops don't exhaust max_reconnect_attempts on an idle broker.
+            received_ok = true
 
             while !engine.should_stop[]
                 if timeout_s !== nothing && (time() - start_time) >= timeout_s
@@ -898,7 +901,7 @@ function start!(
                     signal = TradeSignal(data)
                     decision = execute_signal!(engine, signal, account_balance)
                     on_decision(decision)
-                    # Only reset reconnect budget after useful work on the socket
+                    # Also mark healthy on successful message processing
                     received_ok = true
                 catch e
                     if e isa ZMQ.TimeoutError
@@ -935,7 +938,7 @@ function start!(
             end
         end
 
-        # Reset reconnect counter only after the socket actually received data
+        # Reset reconnect counter after a successful connection or received data
         if received_ok
             reconnect_count = 0
         end
