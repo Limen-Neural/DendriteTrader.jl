@@ -13,7 +13,7 @@ Rust services.
 
 ## Architecture
 
-```
+```text
 Julia strategy/control-plane        Rust infrastructure             Exchange / ledger
         ↓                                  ↑                              ↑
 SNN signal diagnostics → confidence gate → Kelly sizing → paper decision → corpus-ipc / metabolic-ledger
