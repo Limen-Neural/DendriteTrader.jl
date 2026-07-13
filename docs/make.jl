@@ -7,7 +7,7 @@ using DendriteTrader.Backtest
 
 makedocs(
     sitename = "DendriteTrader.jl",
-    modules = [DendriteTrader, DendriteTrader.SizingModule, DendriteTrader.Backtest],
+    modules = [DendriteTrader],
     authors = "Raul Montoya Cardenas",
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true",
