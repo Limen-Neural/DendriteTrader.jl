@@ -25,7 +25,9 @@ makedocs(
     warnonly = [:missing_docs],
 )
 
-deploydocs(
-    repo = "github.com/Limen-Neural/DendriteTrader.jl",
-    push_preview = true,
-)
+if get(ENV, "DOCUMENTER_TEST", "false") != "true"
+    deploydocs(
+        repo = "github.com/Limen-Neural/DendriteTrader.jl",
+        push_preview = true,
+    )
+end

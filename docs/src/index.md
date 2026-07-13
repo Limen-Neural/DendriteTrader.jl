@@ -46,7 +46,7 @@ signal = TradeSignal(Dict(
     "price"        => 100.0,
     "quantity"     => 1.0,
     "confidence"   => 0.92,
-    "timestamp_ns" => Int64(time() * 1e9),
+    "timestamp_ns" => round(Int64, time() * 1e9),
 ))
 
 decision = execute_signal!(engine, signal, 10_000.0)
