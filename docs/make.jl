@@ -20,7 +20,6 @@ makedocs(
             "Sizing" => "sizing.md",
             "Backtest" => "backtest.md",
         ],
-        "API Reference" => "api.md",
     ],
     checkdocs = :exports,
     warnonly = [:missing_docs],
