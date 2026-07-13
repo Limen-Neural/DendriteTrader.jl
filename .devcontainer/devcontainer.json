@@ -1,0 +1,12 @@
+{
+  "name": "DendriteTrader.jl",
+  "image": "julia:1.12",
+  "postCreateCommand": "julia --project=. -e 'using Pkg; Pkg.instantiate()'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "julialang.language-julia"
+      ]
+    }
+  }
+}

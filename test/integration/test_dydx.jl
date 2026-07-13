@@ -25,42 +25,35 @@ using DendriteTrader
 
     @testset "get_price — BTC-USD" begin
         price = get_price(client, "BTC-USD")
+        # Scheduled CI must fail when testnet is unreachable (not stay green)
+        @test price !== nothing
+        @test price.ticker == "BTC-USD"
+        @test price.oracle_price > 0.0
+        @test price.best_bid > 0.0
+        @test price.best_ask > 0.0
+        @test price.best_ask >= price.best_bid
 
-        if price !== nothing
-            @test price.ticker == "BTC-USD"
-            @test price.oracle_price > 0.0
-            @test price.best_bid > 0.0
-            @test price.best_ask > 0.0
-            @test price.best_ask >= price.best_bid
+        @testset "mid_price" begin
+            mp = mid_price(price)
+            @test mp > 0.0
+            @test mp >= price.best_bid
+            @test mp <= price.best_ask
+        end
 
-            @testset "mid_price" begin
-                mp = mid_price(price)
-                @test mp > 0.0
-                @test mp >= price.best_bid
-                @test mp <= price.best_ask
-            end
-
-            @testset "spread_bps" begin
-                sp = spread_bps(price)
-                @test sp >= 0.0
-                @test sp < 1000.0  # spread should be reasonable
-            end
-        else
-            @warn "dYdX testnet returned nothing for BTC-USD (network issue?)"
+        @testset "spread_bps" begin
+            sp = spread_bps(price)
+            @test sp >= 0.0
+            @test sp < 1000.0  # spread should be reasonable
         end
     end
 
     @testset "get_price — ETH-USD" begin
         price = get_price(client, "ETH-USD")
-
-        if price !== nothing
-            @test price.ticker == "ETH-USD"
-            @test price.oracle_price > 0.0
-            @test price.best_bid > 0.0
-            @test price.best_ask > 0.0
-        else
-            @warn "dYdX testnet returned nothing for ETH-USD (network issue?)"
-        end
+        @test price !== nothing
+        @test price.ticker == "ETH-USD"
+        @test price.oracle_price > 0.0
+        @test price.best_bid > 0.0
+        @test price.best_ask > 0.0
     end
 
     @testset "get_price — invalid ticker" begin
@@ -70,10 +63,7 @@ using DendriteTrader
 
     @testset "get_price — timeout/network failure returns nothing" begin
         # Use a very small timeout and a reserved non-routable test IP to exercise timeout handling.
-        client_timeout = DydxClient(
-            base_url = "http://192.0.2.1/v4",
-            timeout_s = 0.01,
-        )
+        client_timeout = DydxClient(base_url = "http://192.0.2.1/v4", timeout_s = 0.01)
         price = get_price(client_timeout, "BTC-USD")
         @test price === nothing
     end
@@ -90,9 +80,8 @@ using DendriteTrader
 
         # Should still work with rate limiting
         price = get_price(client_limited, "BTC-USD")
-        if price !== nothing
-            @test price.ticker == "BTC-USD"
-        end
+        @test price !== nothing
+        @test price.ticker == "BTC-USD"
     end
 
     @testset "price cache" begin
@@ -106,14 +95,13 @@ using DendriteTrader
 
         # First call - cache miss
         price1 = get_price(client_cached, "BTC-USD")
-        if price1 !== nothing
-            @test price1.ticker == "BTC-USD"
-            @test cache_size(client_cached.cache) >= 1
+        @test price1 !== nothing
+        @test price1.ticker == "BTC-USD"
+        @test cache_size(client_cached.cache) >= 1
 
-            # Second call - cache hit
-            price2 = get_price(client_cached, "BTC-USD")
-            @test price2 !== nothing
-            @test price2.ticker == "BTC-USD"
-        end
+        # Second call - cache hit
+        price2 = get_price(client_cached, "BTC-USD")
+        @test price2 !== nothing
+        @test price2.ticker == "BTC-USD"
     end
 end
