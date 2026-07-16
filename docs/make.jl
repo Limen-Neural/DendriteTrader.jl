@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+using Documenter
+using DendriteTrader
+using DendriteTrader.SizingModule
+using DendriteTrader.Backtest
+
+makedocs(
+    sitename = "DendriteTrader.jl",
+    modules = [DendriteTrader],
+    authors = "Raul Montoya Cardenas",
+    format = Documenter.HTML(
+        prettyurls = get(ENV, "CI", nothing) == "true",
+        canonical = "https://limen-neural.github.io/DendriteTrader.jl",
+    ),
+    pages = [
+        "Home" => "index.md",
+        "Modules" => "modules.md",
+        "Guides" =>
+            ["Execution" => "execution.md", "Sizing" => "sizing.md", "Backtest" => "backtest.md"],
+    ],
+    checkdocs = :exports,
+    warnonly = [:missing_docs],
+)
+
+if get(ENV, "DOCUMENTER_TEST", "false") != "true"
+    deploydocs(repo = "github.com/Limen-Neural/DendriteTrader.jl", devbranch = "main")
+end

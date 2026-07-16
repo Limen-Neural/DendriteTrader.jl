@@ -1,5 +1,6 @@
 # DendriteTrader
 
+[![Docs](https://github.com/Limen-Neural/DendriteTrader.jl/actions/workflows/docs.yml/badge.svg)](https://limen-neural.github.io/DendriteTrader.jl)
 [![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](https://github.com/Limen-Neural/DendriteTrader.jl/blob/main/LICENSE)
 
 Julia strategy, diagnostics, paper-trading, and control-plane tooling for neural trading systems.
