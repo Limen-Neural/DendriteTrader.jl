@@ -24,5 +24,5 @@ makedocs(
 )
 
 if get(ENV, "DOCUMENTER_TEST", "false") != "true"
-    deploydocs(repo = "github.com/Limen-Neural/DendriteTrader.jl")
+    deploydocs(repo = "github.com/Limen-Neural/DendriteTrader.jl", devbranch = "main")
 end
