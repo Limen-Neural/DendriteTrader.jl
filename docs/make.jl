@@ -15,18 +15,14 @@ makedocs(
     ),
     pages = [
         "Home" => "index.md",
-        "Modules" => [
-            "Execution" => "execution.md",
-            "Sizing" => "sizing.md",
-            "Backtest" => "backtest.md",
-        ],
+        "Modules" => "modules.md",
+        "Guides" =>
+            ["Execution" => "execution.md", "Sizing" => "sizing.md", "Backtest" => "backtest.md"],
     ],
     checkdocs = :exports,
     warnonly = [:missing_docs],
 )
 
 if get(ENV, "DOCUMENTER_TEST", "false") != "true"
-    deploydocs(
-        repo = "github.com/Limen-Neural/DendriteTrader.jl",
-    )
+    deploydocs(repo = "github.com/Limen-Neural/DendriteTrader.jl")
 end

@@ -64,7 +64,6 @@ engine = ExecutionEngine(confidence_threshold=0.85)
 start!(engine, zmq_endpoint="tcp://localhost:5555")
 ```
 """
-
 module DendriteTrader
 
 using JSON

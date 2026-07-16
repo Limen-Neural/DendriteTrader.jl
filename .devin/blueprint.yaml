@@ -1,0 +1,27 @@
+# https://docs.devin.ai/onboard-devin/environment-yaml
+# Devin environment for DendriteTrader.jl
+
+initialize: |
+  mkdir -p ~/.julia
+  if [ ! -d ~/.julia/julia-1.10.11 ]; then
+    curl -fsSL -o /tmp/julia.tar.gz https://julialang-s3.julialang.org/bin/linux/x64/1.10/julia-1.10.11-linux-x86_64.tar.gz
+    tar -xzf /tmp/julia.tar.gz -C ~/.julia
+  fi
+  echo "PATH=$HOME/.julia/julia-1.10.11/bin:$PATH" >> $ENVRC
+
+maintenance: |
+  julia --project=. -e 'using Pkg; Pkg.instantiate()'
+
+knowledge:
+  - name: lint
+    contents: |
+      julia --project=. -e 'using Pkg; Pkg.add("JuliaFormatter"); using JuliaFormatter; format(".", check=true)'
+  - name: test
+    contents: |
+      julia --project=. -e 'using Pkg; Pkg.test()'
+  - name: build-docs
+    contents: |
+      DOCUMENTER_TEST=true julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate(); include("docs/make.jl")'
+  - name: notes
+    contents: |
+      Project targets Julia 1.10. Use the bundled Julia binary under ~/.julia/julia-1.10.11/bin.
